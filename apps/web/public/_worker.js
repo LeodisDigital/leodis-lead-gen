@@ -1,4 +1,4 @@
-const FALLBACK_API_ORIGIN = "https://anything-top-pharmaceutical-dialogue.trycloudflare.com";
+const FALLBACK_API_ORIGIN = "https://leadgen-api.leodisdigital.co.uk";
 
 function proxyApiRequest(request, env) {
   const sourceUrl = new URL(request.url);
