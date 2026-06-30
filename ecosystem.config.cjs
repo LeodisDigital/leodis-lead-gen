@@ -1,0 +1,40 @@
+module.exports = {
+  apps: [
+    {
+      name: "lead-gen-bct-api",
+      script: "apps/api/dist/server.js",
+      cwd: "/home/karl/projects/lead-gen-bct",
+      instances: 1,
+      exec_mode: "fork",
+      autorestart: true,
+      max_memory_restart: "512M",
+      time: true,
+      env: {
+        NODE_ENV: "production",
+        API_HOST: "192.168.1.207",
+        API_PORT: "30156",
+        DATABASE_URL: "postgresql://leadgen:leadgen@localhost:55432/leadgen",
+        REDIS_URL: "redis://localhost:56379",
+        LIVE_COLLECTION_ENABLED: "false",
+        PRODUCTION_EXPORTS_ENABLED: "false",
+        SESSION_SECRET: "lead-gen-bct-local-network-session-secret-2026",
+      },
+    },
+    {
+      name: "lead-gen-bct-worker",
+      script: "apps/worker/dist/worker.js",
+      cwd: "/home/karl/projects/lead-gen-bct",
+      instances: 1,
+      exec_mode: "fork",
+      autorestart: true,
+      max_memory_restart: "256M",
+      time: true,
+      env: {
+        NODE_ENV: "production",
+        DATABASE_URL: "postgresql://leadgen:leadgen@localhost:55432/leadgen",
+        WORKER_POLL_INTERVAL_MS: "2000",
+        WORKER_LEASE_SECONDS: "120",
+      },
+    },
+  ],
+};

@@ -1,0 +1,2 @@
+DROP INDEX "manual_reviews_subject_status_unique";--> statement-breakpoint
+CREATE UNIQUE INDEX "manual_reviews_pending_subject_unique" ON "manual_reviews" USING btree ("subject_type","subject_id") WHERE "manual_reviews"."status" = 'pending';

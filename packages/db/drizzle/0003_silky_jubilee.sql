@@ -1,0 +1,10 @@
+CREATE TABLE "platform_settings" (
+	"key" text PRIMARY KEY NOT NULL,
+	"value" text NOT NULL,
+	"sensitive" boolean DEFAULT false NOT NULL,
+	"updated_by" uuid,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+ALTER TABLE "platform_settings" ADD CONSTRAINT "platform_settings_updated_by_users_id_fk" FOREIGN KEY ("updated_by") REFERENCES "public"."users"("id") ON DELETE no action ON UPDATE no action;

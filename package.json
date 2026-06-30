@@ -1,0 +1,26 @@
+{
+  "name": "lead-gen-bct",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.12.1",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "corepack pnpm -r build",
+    "check": "corepack pnpm build && corepack pnpm typecheck && corepack pnpm test",
+    "dev:api": "corepack pnpm --filter @lead-gen/api dev",
+    "dev:worker": "corepack pnpm --filter @lead-gen/worker dev",
+    "typecheck": "corepack pnpm -r typecheck",
+    "test": "corepack pnpm -r test",
+    "db:generate": "corepack pnpm --filter @lead-gen/db db:generate",
+    "db:migrate": "corepack pnpm --filter @lead-gen/db db:migrate"
+  },
+  "devDependencies": {
+    "@types/node": "24.0.3",
+    "playwright": "1.57.0",
+    "tsup": "8.5.1",
+    "typescript": "6.0.3",
+    "vitest": "4.1.8"
+  }
+}

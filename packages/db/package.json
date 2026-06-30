@@ -1,0 +1,26 @@
+{
+  "name": "@lead-gen/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./schema": "./src/schema.ts"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts src/schema.ts --format esm --dts --clean",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate"
+  },
+  "dependencies": {
+    "drizzle-orm": "0.45.2",
+    "pg": "8.21.0"
+  },
+  "devDependencies": {
+    "@types/pg": "8.15.4",
+    "drizzle-kit": "0.31.10",
+    "vitest": "4.1.8"
+  }
+}
