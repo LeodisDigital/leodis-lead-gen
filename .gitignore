@@ -3,6 +3,8 @@ node_modules/
 dist/
 coverage/
 .env
+.env.*.local
+.local/
 .local-admin-credentials
 *.log
 .DS_Store
