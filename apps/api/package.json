@@ -18,14 +18,16 @@
     "@lead-gen/eligibility": "workspace:*",
     "@lead-gen/jobs": "workspace:*",
     "@lead-gen/policy": "workspace:*",
-    "@lead-gen/sources": "workspace:*",
     "@lead-gen/shared": "workspace:*",
+    "@lead-gen/sources": "workspace:*",
     "@lead-gen/verification": "workspace:*",
     "fastify": "5.8.5",
+    "nodemailer": "^9.0.3",
     "pg": "8.21.0",
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@types/nodemailer": "^8.0.1",
     "@types/pg": "8.15.4",
     "tsx": "4.20.3",
     "vitest": "4.1.8"

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import nodemailer from "nodemailer";
 import { z } from "zod";
 
 import {
@@ -48,6 +49,8 @@ import {
 import type { DatabasePool } from "./db.js";
 import { searchGooglePlacesText, type GooglePlaceCandidate } from "./google-places.js";
 import {
+  decryptSetting,
+  encryptSetting,
   getRuntimeSettings,
   setCompaniesHouseApiKey,
   setGooglePlacesApiKey,
@@ -305,6 +308,37 @@ const emailTemplateSchema = z.object({
   approved: z.boolean().default(false),
 });
 
+const emailDeliverySettingsSchema = z.object({
+  label: z.string().trim().min(2).max(120).default("Buttercup SMTP"),
+  host: z.string().trim().min(3).max(253),
+  port: z.coerce.number().int().min(1).max(65535).default(465),
+  secure: z.boolean().default(true),
+  username: z.string().trim().min(1).max(320),
+  password: z.string().max(500).optional().default(""),
+  fromName: z.string().trim().min(2).max(160),
+  fromEmail: z.string().trim().email(),
+  replyToEmail: z.string().trim().email().optional().or(z.literal("")).default(""),
+  enabled: z.boolean().default(false),
+});
+
+const emailDeliveryTestSchema = z.object({
+  recipient: z.string().trim().email().optional().or(z.literal("")).default(""),
+});
+
+const previewQuerySchema = z.object({
+  templateId: z.string().uuid().optional(),
+  limit: z.coerce.number().int().min(1).max(25).default(10),
+});
+
+const sendCampaignEmailSchema = z.object({
+  templateId: z.string().uuid().optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+  confirmation: z.string().trim(),
+}).refine((input) => input.confirmation === "SEND APPROVED EMAILS", {
+  message: "Type SEND APPROVED EMAILS to confirm",
+  path: ["confirmation"],
+});
+
 const preferenceImportSchema = z.object({
   service: z.enum(["fps", "mps", "internal", "other"]),
   targetType: z.enum(["company", "domain", "mailbox", "person", "phone", "postal_address", "charity"]),
@@ -458,6 +492,202 @@ async function upsertJsonSetting(
        updated_at = now()`,
     [key, JSON.stringify(value), userId],
   );
+}
+
+type EmailDeliverySettingsRow = {
+  id: string;
+  label: string;
+  host: string;
+  port: number;
+  secure: boolean;
+  username: string;
+  encrypted_password: string | null;
+  from_name: string;
+  from_email: string;
+  reply_to_email: string | null;
+  enabled: boolean;
+  last_tested_at: Date | null;
+  last_test_status: string | null;
+  last_test_message: string | null;
+};
+
+type RenderTemplateRow = {
+  id: string;
+  name: string;
+  subject_line: string | null;
+  body_text: string;
+  controller_identity: string;
+  do_not_contact_route: string;
+};
+
+type PreviewProspectRow = {
+  campaign_prospect_id: string;
+  legal_name: string;
+  entity_type: string;
+  company_number: string | null;
+  charity_commission_number: string | null;
+  registrable_domain: string | null;
+  mailbox: string | null;
+  postal_address: Record<string, unknown> | null;
+  address_hash: string | null;
+  decision_id: string;
+};
+
+function publicAppOrigin(request: FastifyRequest): string {
+  const forwardedHost = request.headers["x-forwarded-host"];
+  const host = Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost || request.hostname;
+  return `https://${host}`;
+}
+
+function renderMergeTemplate(value: string, fields: Record<string, string>): string {
+  return value.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_match, key: string) => fields[key] ?? "");
+}
+
+function addressLines(address: Record<string, unknown> | null | undefined): string[] {
+  if (!address) return [];
+  const values = [
+    address.line1,
+    address.line2,
+    address.town,
+    address.county,
+    address.postcode,
+  ].map((value) => String(value ?? "").trim()).filter(Boolean);
+  if (values.length) return values;
+  const formatted = String(address.formatted ?? "").trim();
+  return formatted ? formatted.split(",").map((part) => part.trim()).filter(Boolean) : [];
+}
+
+function mergeFieldsFor(row: PreviewProspectRow, doNotContactUrl: string, doNotContactCode = ""): Record<string, string> {
+  return {
+    organisation_name: row.legal_name,
+    contact_name: row.legal_name,
+    entity_type: row.entity_type,
+    company_number: row.company_number ?? "",
+    charity_number: row.charity_commission_number ?? "",
+    domain: row.registrable_domain ?? "",
+    role_mailbox: row.mailbox ?? "",
+    postal_address: addressLines(row.postal_address).join("\n"),
+    postal_address_json: JSON.stringify(row.postal_address ?? {}),
+    do_not_contact_url: doNotContactUrl,
+    do_not_contact_code: doNotContactCode,
+    decision_id: row.decision_id,
+  };
+}
+
+function publicEmailSettings(row: EmailDeliverySettingsRow | undefined | null) {
+  return row
+    ? {
+        id: row.id,
+        label: row.label,
+        host: row.host,
+        port: row.port,
+        secure: row.secure,
+        username: row.username,
+        fromName: row.from_name,
+        fromEmail: row.from_email,
+        replyToEmail: row.reply_to_email,
+        enabled: row.enabled,
+        passwordConfigured: Boolean(row.encrypted_password),
+        lastTestedAt: row.last_tested_at,
+        lastTestStatus: row.last_test_status,
+        lastTestMessage: row.last_test_message,
+      }
+    : null;
+}
+
+async function getEmailDeliverySettings(
+  pool: DatabasePool,
+  organisationId: string,
+): Promise<EmailDeliverySettingsRow | null> {
+  const result = await pool.query<EmailDeliverySettingsRow>(
+    `select id, label, host, port, secure, username, encrypted_password,
+       from_name, from_email, reply_to_email, enabled, last_tested_at,
+       last_test_status, last_test_message
+     from email_delivery_settings
+     where organisation_id = $1
+     limit 1`,
+    [organisationId],
+  );
+  return result.rows[0] ?? null;
+}
+
+async function getPreviewProspects(
+  pool: DatabasePool,
+  organisationId: string,
+  campaignId: string,
+  channel: "corporate_email" | "postal_letter",
+  limit: number,
+): Promise<PreviewProspectRow[]> {
+  const result = await pool.query<PreviewProspectRow>(
+    `select cp.id as campaign_prospect_id, pe.legal_name, pe.entity_type,
+       pe.company_number, pe.charity_commission_number, d.registrable_domain,
+       m.address as mailbox, pa.address as postal_address, pa.address_hash,
+       ocd.id as decision_id
+     from campaign_prospects cp
+     join prospect_entities pe on pe.id = cp.prospect_entity_id
+     left join domains d on d.id = cp.domain_id
+     left join mailboxes m on m.id = cp.mailbox_id
+     left join prospect_addresses pa on pa.prospect_entity_id = pe.id
+     join lateral (
+       select id, outcome, expires_at
+       from outreach_channel_decisions
+       where campaign_prospect_id = cp.id
+         and channel = $3
+         and superseded_at is null
+       order by decided_at desc limit 1
+     ) ocd on ocd.outcome = 'eligible' and ocd.expires_at > now()
+     where cp.campaign_id = $1 and cp.organisation_id = $2
+     order by cp.created_at desc
+     limit $4`,
+    [campaignId, organisationId, channel, limit],
+  );
+  const rows: PreviewProspectRow[] = [];
+  for (const row of result.rows) {
+    const suppression = await pool.query(
+      `select 1 from suppression_entries
+       where active = true and (scope = 'platform' or organisation_id = $1)
+         and ((target_type = 'company' and target_hash = $2)
+           or (target_type = 'charity' and target_hash = $3)
+           or (target_type = 'domain' and target_hash = $4)
+           or (target_type = 'mailbox' and target_hash = $5)
+           or (target_type = 'postal_address' and target_hash = $6)
+           or (target_type = 'person' and target_hash = $7))
+       limit 1`,
+      [
+        organisationId,
+        hashIdentifier(String(row.company_number ?? row.legal_name ?? "")),
+        hashIdentifier(String(row.charity_commission_number ?? row.legal_name ?? "")),
+        row.registrable_domain ? hashIdentifier(String(row.registrable_domain)) : "",
+        row.mailbox ? hashIdentifier(String(row.mailbox)) : "",
+        row.address_hash ? String(row.address_hash) : "",
+        hashIdentifier(String(row.legal_name ?? "")),
+      ],
+    );
+    if (!suppression.rows[0]) rows.push(row);
+  }
+  return rows;
+}
+
+async function getRenderTemplate(
+  pool: DatabasePool,
+  organisationId: string,
+  tableName: "email_template_manifests" | "letter_template_manifests",
+  templateId?: string,
+): Promise<RenderTemplateRow | null> {
+  const where = templateId
+    ? "organisation_id = $1 and id = $2"
+    : "organisation_id = $1 and approved = true and expires_at > now()";
+  const order = templateId ? "" : "order by approved_at desc nulls last, created_at desc";
+  const params = templateId ? [organisationId, templateId] : [organisationId];
+  const result = await pool.query<RenderTemplateRow>(
+    `select id, name, subject_line, body_text, controller_identity, do_not_contact_route
+     from ${tableName}
+     where ${where}
+     ${order}
+     limit 1`,
+    params,
+  );
+  return result.rows[0] ?? null;
 }
 
 async function latestCharityPrincipal(pool: DatabasePool, organisationId: string) {
@@ -902,10 +1132,11 @@ export function registerApiRoutes(
   app.get("/api/settings/configuration", async (request, reply) => {
     const auth = await requireOwner(pool, request, reply);
     if (!auth) return;
-    const [settings, principal, channelPolicy] = await Promise.all([
+    const [settings, principal, channelPolicy, emailDelivery] = await Promise.all([
       getRuntimeSettings(pool, environment),
       latestCharityPrincipal(pool, auth.organisationId),
       getChannelPolicy(pool),
+      getEmailDeliverySettings(pool, auth.organisationId),
     ]);
     return {
       companiesHouseConfigured: settings.companiesHouseConfigured,
@@ -916,7 +1147,136 @@ export function registerApiRoutes(
       clientTargetIntakeEnabled: Boolean(await requireClientSourcePolicy(pool)),
       charityPrincipal: principal,
       channelPolicy,
+      emailDelivery: publicEmailSettings(emailDelivery),
     };
+  });
+
+  app.get("/api/settings/email-delivery", async (request, reply) => {
+    const auth = await requireOwner(pool, request, reply);
+    if (!auth) return;
+    return { emailDelivery: publicEmailSettings(await getEmailDeliverySettings(pool, auth.organisationId)) };
+  });
+
+  app.post("/api/settings/email-delivery", async (request, reply) => {
+    const auth = await requireOwner(pool, request, reply);
+    if (!auth) return;
+    const input = emailDeliverySettingsSchema.parse(request.body);
+    const existing = await getEmailDeliverySettings(pool, auth.organisationId);
+    const encryptedPassword = input.password
+      ? encryptSetting(input.password, environment)
+      : existing?.encrypted_password ?? null;
+    if (input.enabled && !encryptedPassword) {
+      return reply.code(400).send({ message: "SMTP password is required before enabling email delivery" });
+    }
+    const result = await pool.query<EmailDeliverySettingsRow>(
+      `insert into email_delivery_settings
+        (organisation_id, provider, label, host, port, secure, username,
+         encrypted_password, from_name, from_email, reply_to_email, enabled, created_by)
+       values ($1,'smtp',$2,$3,$4,$5,$6,$7,$8,$9,nullif($10,''),$11,$12)
+       on conflict (organisation_id) do update set
+         label = excluded.label,
+         host = excluded.host,
+         port = excluded.port,
+         secure = excluded.secure,
+         username = excluded.username,
+         encrypted_password = excluded.encrypted_password,
+         from_name = excluded.from_name,
+         from_email = excluded.from_email,
+         reply_to_email = excluded.reply_to_email,
+         enabled = excluded.enabled,
+         updated_at = now()
+       returning id, label, host, port, secure, username, encrypted_password,
+         from_name, from_email, reply_to_email, enabled, last_tested_at,
+         last_test_status, last_test_message`,
+      [
+        auth.organisationId,
+        input.label,
+        input.host,
+        input.port,
+        input.secure,
+        input.username,
+        encryptedPassword,
+        input.fromName,
+        input.fromEmail,
+        input.replyToEmail,
+        input.enabled,
+        auth.userId,
+      ],
+    );
+    await writeAudit(pool, auth, "settings.email_delivery_updated", "email_delivery_settings", result.rows[0]!.id, {
+      host: input.host,
+      port: input.port,
+      enabled: input.enabled,
+      fromEmail: input.fromEmail,
+    });
+    return { ok: true, emailDelivery: publicEmailSettings(result.rows[0]) };
+  });
+
+  app.post("/api/settings/email-delivery/test", async (request, reply) => {
+    const auth = await requireOwner(pool, request, reply);
+    if (!auth) return;
+    const input = emailDeliveryTestSchema.parse(request.body);
+    const settings = await getEmailDeliverySettings(pool, auth.organisationId);
+    if (!settings?.encrypted_password) {
+      return reply.code(400).send({ message: "SMTP settings and password are required before testing" });
+    }
+    let status = "failed";
+    let message = "";
+    try {
+      const transport = nodemailer.createTransport({
+        host: settings.host,
+        port: settings.port,
+        secure: settings.secure,
+        auth: {
+          user: settings.username,
+          pass: decryptSetting(settings.encrypted_password, environment),
+        },
+      });
+      if (input.recipient) {
+        const info = await transport.sendMail({
+          from: { name: settings.from_name, address: settings.from_email },
+          to: input.recipient,
+          replyTo: settings.reply_to_email || undefined,
+          subject: "Buttercup lead-gen email test",
+          text: `${settings.label} is configured for outbound email.\n\n${leodisFooterText}`,
+        });
+        status = "sent";
+        message = info.messageId || "Test email sent";
+        await pool.query(
+          `insert into outbound_email_logs
+            (organisation_id, recipient_hash, sender_email, subject_hash,
+             status, provider_message_id, sent_at, created_by)
+           values ($1,$2,$3,$4,'sent',$5,now(),$6)`,
+          [
+            auth.organisationId,
+            hashIdentifier(input.recipient),
+            settings.from_email,
+            hashIdentifier("Buttercup lead-gen email test"),
+            info.messageId || null,
+            auth.userId,
+          ],
+        );
+      } else {
+        await transport.verify();
+        status = "verified";
+        message = "SMTP connection verified";
+      }
+    } catch (error) {
+      message = error instanceof Error ? error.message : "SMTP test failed";
+    }
+    await pool.query(
+      `update email_delivery_settings
+       set last_tested_at = now(), last_test_status = $1, last_test_message = $2,
+         updated_at = now()
+       where organisation_id = $3`,
+      [status, message.slice(0, 500), auth.organisationId],
+    );
+    await writeAudit(pool, auth, "settings.email_delivery_tested", "email_delivery_settings", settings.id, {
+      status,
+      sent: Boolean(input.recipient),
+    });
+    if (status === "failed") return reply.code(400).send({ message });
+    return { ok: true, status, message };
   });
 
   app.get("/api/settings/charity-principal", async (request, reply) => {
@@ -3289,6 +3649,187 @@ export function registerApiRoutes(
 
   app.get("/api/campaigns/:id/review-quarantine.csv", async (request, reply) =>
     exportChannelCsv(request, reply, "quarantine"));
+
+  app.get("/api/campaigns/:id/email-preview", async (request, reply) => {
+    const auth = await requireAuth(pool, request, reply);
+    if (!auth) return;
+    const { id } = request.params as { id: string };
+    const input = previewQuerySchema.parse(request.query);
+    const campaign = await campaignOwnedBy(pool, id, auth.organisationId);
+    if (!campaign) return reply.code(404).send({ message: "Campaign not found" });
+    const template = await getRenderTemplate(pool, auth.organisationId, "email_template_manifests", input.templateId);
+    if (!template) return reply.code(404).send({ message: "No email template is available for preview" });
+    const prospects = await getPreviewProspects(pool, auth.organisationId, id, "corporate_email", input.limit);
+    const origin = publicAppOrigin(request);
+    return {
+      template: {
+        id: template.id,
+        name: template.name,
+        controllerIdentity: template.controller_identity,
+      },
+      count: prospects.length,
+      items: prospects.map((prospect) => {
+        const doNotContactUrl = `${origin}${template.do_not_contact_route}?preview=true`;
+        const fields = mergeFieldsFor(prospect, doNotContactUrl);
+        return {
+          campaignProspectId: prospect.campaign_prospect_id,
+          recipient: prospect.mailbox,
+          organisationName: prospect.legal_name,
+          subject: renderMergeTemplate(template.subject_line ?? "", fields),
+          body: renderMergeTemplate(template.body_text, fields),
+        };
+      }),
+    };
+  });
+
+  app.get("/api/campaigns/:id/letter-preview", async (request, reply) => {
+    const auth = await requireAuth(pool, request, reply);
+    if (!auth) return;
+    const { id } = request.params as { id: string };
+    const input = previewQuerySchema.parse(request.query);
+    const campaign = await campaignOwnedBy(pool, id, auth.organisationId);
+    if (!campaign) return reply.code(404).send({ message: "Campaign not found" });
+    const template = await getRenderTemplate(pool, auth.organisationId, "letter_template_manifests", input.templateId);
+    if (!template) return reply.code(404).send({ message: "No letter template is available for preview" });
+    const prospects = await getPreviewProspects(pool, auth.organisationId, id, "postal_letter", input.limit);
+    const origin = publicAppOrigin(request);
+    return {
+      template: {
+        id: template.id,
+        name: template.name,
+        controllerIdentity: template.controller_identity,
+      },
+      count: prospects.length,
+      items: prospects.map((prospect) => {
+        const doNotContactCode = "PREVIEW";
+        const doNotContactUrl = `${origin}${template.do_not_contact_route}?code=${doNotContactCode}`;
+        const fields = mergeFieldsFor(prospect, doNotContactUrl, doNotContactCode);
+        return {
+          campaignProspectId: prospect.campaign_prospect_id,
+          organisationName: prospect.legal_name,
+          addressLines: addressLines(prospect.postal_address),
+          heading: template.subject_line,
+          body: renderMergeTemplate(template.body_text, fields),
+          doNotContactCode,
+        };
+      }),
+    };
+  });
+
+  app.post("/api/campaigns/:id/send-email", async (request, reply) => {
+    const auth = await requireOwner(pool, request, reply);
+    if (!auth) return;
+    const { id } = request.params as { id: string };
+    const input = sendCampaignEmailSchema.parse(request.body);
+    const campaign = await campaignOwnedBy(pool, id, auth.organisationId);
+    if (!campaign) return reply.code(404).send({ message: "Campaign not found" });
+    if (!(await requireExportGate(auth, reply))) return;
+    if (campaign.status !== "approved" || campaign.expires_at.getTime() <= Date.now()) {
+      return reply.code(423).send({ message: "Campaign must be approved and current before sending email" });
+    }
+    const [channelPolicy, delivery, template] = await Promise.all([
+      getChannelPolicy(pool),
+      getEmailDeliverySettings(pool, auth.organisationId),
+      getRenderTemplate(pool, auth.organisationId, "email_template_manifests", input.templateId),
+    ]);
+    if (!channelPolicy.corporateEmailEnabled) {
+      return reply.code(423).send({ message: "Corporate email channel policy is not enabled" });
+    }
+    if (!delivery?.enabled || !delivery.encrypted_password) {
+      return reply.code(423).send({ message: "Email delivery is not enabled or missing SMTP credentials" });
+    }
+    if (!template) {
+      return reply.code(423).send({ message: "No approved current email template is available" });
+    }
+    const prospects = await getPreviewProspects(pool, auth.organisationId, id, "corporate_email", input.limit);
+    const transport = nodemailer.createTransport({
+      host: delivery.host,
+      port: delivery.port,
+      secure: delivery.secure,
+      auth: {
+        user: delivery.username,
+        pass: decryptSetting(delivery.encrypted_password, environment),
+      },
+    });
+    const origin = publicAppOrigin(request);
+    const results: Array<{ campaignProspectId: string; recipient: string | null; status: string; message?: string }> = [];
+    for (const prospect of prospects) {
+      if (!prospect.mailbox) continue;
+      const token = randomUUID();
+      const doNotContactUrl = `${origin}${template.do_not_contact_route}?token=${token}`;
+      const fields = mergeFieldsFor(prospect, doNotContactUrl);
+      const subject = renderMergeTemplate(template.subject_line ?? "", fields);
+      const body = renderMergeTemplate(template.body_text, fields);
+      let tokenId: string | null = null;
+      let status = "failed";
+      let providerMessageId: string | null = null;
+      let failureReason: string | null = null;
+      try {
+        const tokenResult = await pool.query<{ id: string }>(
+          `insert into do_not_contact_tokens
+            (organisation_id, campaign_prospect_id, channel, token_hash,
+             suppression_scope, expires_at)
+           values ($1,$2,'corporate_email',$3,'organisation',now() + interval '1 year')
+           returning id`,
+          [auth.organisationId, prospect.campaign_prospect_id, hashIdentifier(token)],
+        );
+        tokenId = tokenResult.rows[0]!.id;
+        const info = await transport.sendMail({
+          from: { name: delivery.from_name, address: delivery.from_email },
+          to: prospect.mailbox,
+          replyTo: delivery.reply_to_email || undefined,
+          subject,
+          text: body,
+        });
+        status = "sent";
+        providerMessageId = info.messageId || null;
+      } catch (error) {
+        failureReason = error instanceof Error ? error.message : "Email send failed";
+        if (tokenId) {
+          await pool.query("delete from do_not_contact_tokens where id = $1", [tokenId]);
+        }
+      }
+      await pool.query(
+        `insert into outbound_email_logs
+          (organisation_id, campaign_id, campaign_prospect_id, template_manifest_id,
+           recipient_hash, sender_email, subject_hash, status, provider_message_id,
+           failure_reason, sent_at, created_by)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,case when $8 = 'sent' then now() else null end,$11)`,
+        [
+          auth.organisationId,
+          id,
+          prospect.campaign_prospect_id,
+          template.id,
+          hashIdentifier(prospect.mailbox),
+          delivery.from_email,
+          hashIdentifier(subject),
+          status,
+          providerMessageId,
+          failureReason,
+          auth.userId,
+        ],
+      );
+      results.push({
+        campaignProspectId: prospect.campaign_prospect_id,
+        recipient: prospect.mailbox,
+        status,
+        message: failureReason ?? providerMessageId ?? undefined,
+      });
+    }
+    await writeAudit(pool, auth, "campaign.email_send_completed", "campaign", id, {
+      attempted: results.length,
+      sent: results.filter((item) => item.status === "sent").length,
+      failed: results.filter((item) => item.status !== "sent").length,
+      policyVersion,
+    });
+    return {
+      ok: true,
+      attempted: results.length,
+      sent: results.filter((item) => item.status === "sent").length,
+      failed: results.filter((item) => item.status !== "sent").length,
+      results,
+    };
+  });
 
   app.post("/api/campaigns/:id/letter-fulfilment/self-print", async (request, reply) => {
     const auth = await requireOwner(pool, request, reply);

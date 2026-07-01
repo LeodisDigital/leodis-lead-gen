@@ -543,6 +543,50 @@ export const emailTemplateManifests = pgTable("email_template_manifests", {
   index("email_template_org_idx").on(table.organisationId, table.approved),
 ]);
 
+export const emailDeliverySettings = pgTable("email_delivery_settings", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organisationId: uuid("organisation_id").notNull().references(() => organisations.id),
+  provider: text("provider").notNull().default("smtp"),
+  label: text("label").notNull(),
+  host: text("host").notNull(),
+  port: integer("port").notNull(),
+  secure: boolean("secure").notNull().default(true),
+  username: text("username").notNull(),
+  encryptedPassword: text("encrypted_password"),
+  fromName: text("from_name").notNull(),
+  fromEmail: text("from_email").notNull(),
+  replyToEmail: text("reply_to_email"),
+  enabled: boolean("enabled").notNull().default(false),
+  lastTestedAt: timestamp("last_tested_at", { withTimezone: true }),
+  lastTestStatus: text("last_test_status"),
+  lastTestMessage: text("last_test_message"),
+  createdBy: uuid("created_by").references(() => users.id),
+  ...timestamps,
+}, (table) => [
+  uniqueIndex("email_delivery_org_unique").on(table.organisationId),
+  index("email_delivery_org_enabled_idx").on(table.organisationId, table.enabled),
+]);
+
+export const outboundEmailLogs = pgTable("outbound_email_logs", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organisationId: uuid("organisation_id").notNull().references(() => organisations.id),
+  campaignId: uuid("campaign_id").references(() => campaigns.id),
+  campaignProspectId: uuid("campaign_prospect_id").references(() => campaignProspects.id),
+  templateManifestId: uuid("template_manifest_id").references(() => emailTemplateManifests.id),
+  recipientHash: text("recipient_hash").notNull(),
+  senderEmail: text("sender_email").notNull(),
+  subjectHash: text("subject_hash").notNull(),
+  status: text("status").notNull().default("created"),
+  providerMessageId: text("provider_message_id"),
+  failureReason: text("failure_reason"),
+  sentAt: timestamp("sent_at", { withTimezone: true }),
+  createdBy: uuid("created_by").references(() => users.id),
+  ...timestamps,
+}, (table) => [
+  index("outbound_email_logs_campaign_idx").on(table.campaignId),
+  index("outbound_email_logs_status_idx").on(table.organisationId, table.status),
+]);
+
 export const fulfilmentProviders = pgTable("fulfilment_providers", {
   id: uuid("id").primaryKey().defaultRandom(),
   organisationId: uuid("organisation_id").notNull().references(() => organisations.id),

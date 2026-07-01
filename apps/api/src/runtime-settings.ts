@@ -27,14 +27,14 @@ function encryptionKey(environment: Environment): Buffer {
   return createHash("sha256").update(environment.SESSION_SECRET).digest();
 }
 
-function encrypt(value: string, environment: Environment): string {
+export function encryptSetting(value: string, environment: Environment): string {
   const iv = randomBytes(12);
   const cipher = createCipheriv("aes-256-gcm", encryptionKey(environment), iv);
   const encrypted = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
   return [iv, cipher.getAuthTag(), encrypted].map((part) => part.toString("base64url")).join(".");
 }
 
-function decrypt(value: string, environment: Environment): string {
+export function decryptSetting(value: string, environment: Environment): string {
   const [iv, tag, encrypted] = value.split(".").map((part) => Buffer.from(part ?? "", "base64url"));
   if (!iv || !tag || !encrypted) throw new Error("Invalid encrypted setting");
   const decipher = createDecipheriv("aes-256-gcm", encryptionKey(environment), iv);
@@ -55,7 +55,7 @@ export async function getRuntimeSettings(
   let apiKey = environment.COMPANIES_HOUSE_API_KEY;
   if (storedCompaniesHouseKey) {
     try {
-      apiKey = decrypt(storedCompaniesHouseKey, environment);
+      apiKey = decryptSetting(storedCompaniesHouseKey, environment);
     } catch {
       apiKey = undefined;
     }
@@ -64,7 +64,7 @@ export async function getRuntimeSettings(
   let googleApiKey = environment.GOOGLE_PLACES_API_KEY;
   if (storedGooglePlacesKey) {
     try {
-      googleApiKey = decrypt(storedGooglePlacesKey, environment);
+      googleApiKey = decryptSetting(storedGooglePlacesKey, environment);
     } catch {
       googleApiKey = undefined;
     }
@@ -93,7 +93,7 @@ export async function setCompaniesHouseApiKey(
     await pool.query("delete from platform_settings where key = $1", [companiesHouseKey]);
     return;
   }
-  await upsertSetting(pool, companiesHouseKey, encrypt(apiKey, environment), true, userId);
+  await upsertSetting(pool, companiesHouseKey, encryptSetting(apiKey, environment), true, userId);
 }
 
 export async function setGooglePlacesApiKey(
@@ -106,7 +106,7 @@ export async function setGooglePlacesApiKey(
     await pool.query("delete from platform_settings where key = $1", [googlePlacesKey]);
     return;
   }
-  await upsertSetting(pool, googlePlacesKey, encrypt(apiKey, environment), true, userId);
+  await upsertSetting(pool, googlePlacesKey, encryptSetting(apiKey, environment), true, userId);
 }
 
 export async function setProductionExportsEnabled(

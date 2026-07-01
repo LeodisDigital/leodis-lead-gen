@@ -96,6 +96,23 @@ type ChannelPolicy = {
   evidenceReference?: string;
 };
 
+type EmailDelivery = {
+  id: string;
+  label: string;
+  host: string;
+  port: number;
+  secure: boolean;
+  username: string;
+  fromName: string;
+  fromEmail: string;
+  replyToEmail?: string | null;
+  enabled: boolean;
+  passwordConfigured: boolean;
+  lastTestedAt?: string | null;
+  lastTestStatus?: string | null;
+  lastTestMessage?: string | null;
+};
+
 const nav = [
   { path: "/", label: "Overview", icon: LayoutDashboard },
   { path: "/campaigns", label: "Campaigns", icon: Target },
@@ -391,7 +408,40 @@ function CampaignDetail({ id, bootstrap, user }: { id: string; bootstrap: Bootst
   const action = data.campaign.status === "pending_approval" && user.role === "owner"
     ? <Button onClick={approve}><ClipboardCheck size={16} /> Verify and approve</Button>
     : <div className="export-actions"><a className={`button secondary ${bootstrap.productionExportsEnabled ? "" : "disabled"}`} href={`/api/campaigns/${id}/export-email.csv`}><Download size={16} /> Email CSV</a><a className={`button secondary ${bootstrap.productionExportsEnabled ? "" : "disabled"}`} href={`/api/campaigns/${id}/export-letters.csv`}><Download size={16} /> Letter CSV</a><a className="button secondary" href={`/api/campaigns/${id}/review-quarantine.csv`}><Download size={16} /> Quarantine</a></div>;
-  return <><PageHeader title={data.campaign.name} copy={data.campaign.purpose} action={action} /><div className="mini-stats"><span><strong>{data.leads.length + (prospects?.length ?? 0)}</strong> assessed</span><span><strong>{eligible + prospectEligible}</strong> eligible</span><span><strong>{(prospects?.filter((item) => item.outcome === "held").length ?? 0)}</strong> held</span></div><section className="panel"><div className="panel-head"><div><h2>Google discovery</h2><p>Find organisations by category and location, verify companies where possible, then route to email or post.</p></div><Status value={bootstrap.googlePlacesConfigured ? "configured" : "key required"} /></div><form className="prospect-form" onSubmit={discoverGoogle}><label>Search<input name="query" required defaultValue={data.campaign.target_industry ?? ""} placeholder="charities, electricians, plumbers" /></label><label>Location<input name="location" defaultValue={data.campaign.target_location ?? ""} placeholder="Leeds" /></label><label>Maximum results<input name="maxResults" type="number" min="1" max="20" defaultValue="10" /></label><label className="checkbox-label"><input name="lawfulBasisRecorded" type="checkbox" /> Lawful basis recorded</label><label className="checkbox-label"><input name="transparencyRecorded" type="checkbox" /> Transparency recorded</label><label className="checkbox-label"><input name="addressSourceApproved" type="checkbox" /> Address source approved</label><label className="checkbox-label"><input name="publicContextApproved" type="checkbox" /> Public context approved</label><label className="checkbox-label"><input name="discoverWebsiteMailboxes" type="checkbox" defaultChecked /> Find role emails on websites</label>{error ? <p className="form-error">{error}</p> : null}<Button type="submit"><Search size={16} /> Discover leads</Button></form></section><section className="panel"><div className="panel-head"><div><h2>Add Buttercup prospect</h2><p>Assess organisations or people into email, letter, consent-required, held, or quarantine channels.</p></div></div><form className="prospect-form" onSubmit={addProspect}><label>Entity type<select name="entityType" defaultValue="uk_limited_company"><option value="uk_limited_company">UK limited company</option><option value="uk_llp">UK LLP</option><option value="registered_charity">Registered charity</option><option value="charitable_company">Charitable company</option><option value="sole_trader">Sole trader</option><option value="individual">Individual</option><option value="unsupported">Unsupported</option></select></label><label>Channel<select name="channel" defaultValue="corporate_email"><option value="corporate_email">Corporate email</option><option value="postal_letter">Postal letter</option><option value="individual_email">Individual email</option></select></label><label>Legal name<input name="legalName" required placeholder="Example Community Ltd" /></label><label>Trading name<input name="tradingName" placeholder="Optional" /></label><label>Company number<input name="companyNumber" placeholder="01234567" /></label><label>Charity number<input name="charityCommissionNumber" placeholder="1128027" /></label><label>OSCR number<input name="oscrNumber" placeholder="SC042679" /></label><label>Domain<input name="domain" placeholder="example.org.uk" /></label><label>Mailbox<input name="mailbox" type="email" placeholder="info@example.org.uk" /></label><label>Address line<input name="postalLine1" placeholder="1 High Street" /></label><label>Town<input name="postalTown" placeholder="Leeds" /></label><label>Postcode<input name="postalPostcode" placeholder="LS1 1AA" /></label><label>Address context<select name="addressContext" defaultValue="unknown"><option value="business">Business</option><option value="registered_office">Registered office</option><option value="likely_home">Likely home</option><option value="unknown">Unknown</option></select></label><label className="checkbox-label"><input name="lawfulBasisRecorded" type="checkbox" /> Lawful basis recorded</label><label className="checkbox-label"><input name="transparencyRecorded" type="checkbox" /> Transparency recorded</label><label className="checkbox-label"><input name="addressSourceApproved" type="checkbox" /> Address source approved</label><label className="checkbox-label"><input name="publicContextApproved" type="checkbox" /> Public context approved</label><label className="checkbox-label"><input name="consentRecorded" type="checkbox" /> Consent recorded</label><label className="checkbox-label"><input name="sensitiveTargetingRisk" type="checkbox" /> Sensitive targeting risk</label>{error ? <p className="form-error">{error}</p> : null}<Button type="submit"><Plus size={16} /> Assess prospect</Button></form></section><section className="panel"><div className="panel-head"><div><h2>Prospect channel decisions</h2><p>Current Buttercup outreach decision by channel.</p></div></div>{prospects ? <ProspectTable prospects={prospects} /> : <Loading />}</section><section className="panel"><div className="panel-head"><div><h2>Legacy lead assessments</h2><p>Existing company/mailbox records retained during migration.</p></div></div><LeadTable leads={data.leads} suppress={suppress} /></section></>;
+  return <><PageHeader title={data.campaign.name} copy={data.campaign.purpose} action={action} /><div className="mini-stats"><span><strong>{data.leads.length + (prospects?.length ?? 0)}</strong> assessed</span><span><strong>{eligible + prospectEligible}</strong> eligible</span><span><strong>{(prospects?.filter((item) => item.outcome === "held").length ?? 0)}</strong> held</span></div><CampaignPreviewPanel campaignId={id} /><section className="panel"><div className="panel-head"><div><h2>Google discovery</h2><p>Find organisations by category and location, verify companies where possible, then route to email or post.</p></div><Status value={bootstrap.googlePlacesConfigured ? "configured" : "key required"} /></div><form className="prospect-form" onSubmit={discoverGoogle}><label>Search<input name="query" required defaultValue={data.campaign.target_industry ?? ""} placeholder="charities, electricians, plumbers" /></label><label>Location<input name="location" defaultValue={data.campaign.target_location ?? ""} placeholder="Leeds" /></label><label>Maximum results<input name="maxResults" type="number" min="1" max="20" defaultValue="10" /></label><label className="checkbox-label"><input name="lawfulBasisRecorded" type="checkbox" /> Lawful basis recorded</label><label className="checkbox-label"><input name="transparencyRecorded" type="checkbox" /> Transparency recorded</label><label className="checkbox-label"><input name="addressSourceApproved" type="checkbox" /> Address source approved</label><label className="checkbox-label"><input name="publicContextApproved" type="checkbox" /> Public context approved</label><label className="checkbox-label"><input name="discoverWebsiteMailboxes" type="checkbox" defaultChecked /> Find role emails on websites</label>{error ? <p className="form-error">{error}</p> : null}<Button type="submit"><Search size={16} /> Discover leads</Button></form></section><section className="panel"><div className="panel-head"><div><h2>Add Buttercup prospect</h2><p>Assess organisations or people into email, letter, consent-required, held, or quarantine channels.</p></div></div><form className="prospect-form" onSubmit={addProspect}><label>Entity type<select name="entityType" defaultValue="uk_limited_company"><option value="uk_limited_company">UK limited company</option><option value="uk_llp">UK LLP</option><option value="registered_charity">Registered charity</option><option value="charitable_company">Charitable company</option><option value="sole_trader">Sole trader</option><option value="individual">Individual</option><option value="unsupported">Unsupported</option></select></label><label>Channel<select name="channel" defaultValue="corporate_email"><option value="corporate_email">Corporate email</option><option value="postal_letter">Postal letter</option><option value="individual_email">Individual email</option></select></label><label>Legal name<input name="legalName" required placeholder="Example Community Ltd" /></label><label>Trading name<input name="tradingName" placeholder="Optional" /></label><label>Company number<input name="companyNumber" placeholder="01234567" /></label><label>Charity number<input name="charityCommissionNumber" placeholder="1128027" /></label><label>OSCR number<input name="oscrNumber" placeholder="SC042679" /></label><label>Domain<input name="domain" placeholder="example.org.uk" /></label><label>Mailbox<input name="mailbox" type="email" placeholder="info@example.org.uk" /></label><label>Address line<input name="postalLine1" placeholder="1 High Street" /></label><label>Town<input name="postalTown" placeholder="Leeds" /></label><label>Postcode<input name="postalPostcode" placeholder="LS1 1AA" /></label><label>Address context<select name="addressContext" defaultValue="unknown"><option value="business">Business</option><option value="registered_office">Registered office</option><option value="likely_home">Likely home</option><option value="unknown">Unknown</option></select></label><label className="checkbox-label"><input name="lawfulBasisRecorded" type="checkbox" /> Lawful basis recorded</label><label className="checkbox-label"><input name="transparencyRecorded" type="checkbox" /> Transparency recorded</label><label className="checkbox-label"><input name="addressSourceApproved" type="checkbox" /> Address source approved</label><label className="checkbox-label"><input name="publicContextApproved" type="checkbox" /> Public context approved</label><label className="checkbox-label"><input name="consentRecorded" type="checkbox" /> Consent recorded</label><label className="checkbox-label"><input name="sensitiveTargetingRisk" type="checkbox" /> Sensitive targeting risk</label>{error ? <p className="form-error">{error}</p> : null}<Button type="submit"><Plus size={16} /> Assess prospect</Button></form></section><section className="panel"><div className="panel-head"><div><h2>Prospect channel decisions</h2><p>Current Buttercup outreach decision by channel.</p></div></div>{prospects ? <ProspectTable prospects={prospects} /> : <Loading />}</section><section className="panel"><div className="panel-head"><div><h2>Legacy lead assessments</h2><p>Existing company/mailbox records retained during migration.</p></div></div><LeadTable leads={data.leads} suppress={suppress} /></section></>;
+}
+
+function CampaignPreviewPanel({ campaignId }: { campaignId: string }) {
+  const [mode, setMode] = useState<"email" | "letter">("email");
+  const [preview, setPreview] = useState<RenderPreview | null>(null);
+  const [error, setError] = useState("");
+  const [sendStatus, setSendStatus] = useState("");
+  async function load(nextMode = mode) {
+    setError("");
+    setPreview(null);
+    try {
+      setPreview(await api<RenderPreview>(`/api/campaigns/${campaignId}/${nextMode}-preview?limit=5`));
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+  useEffect(() => { load(mode); }, [campaignId, mode]);
+  async function send(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    setSendStatus("");
+    const data = new FormData(event.currentTarget);
+    try {
+      const result = await post<{ attempted: number; sent: number; failed: number }>("/api/campaigns/" + campaignId + "/send-email", {
+        confirmation: data.get("confirmation"),
+        limit: Number(data.get("limit") || 100),
+      });
+      setSendStatus(`Attempted ${result.attempted}; sent ${result.sent}; failed ${result.failed}.`);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+  return <section className="panel preview-panel"><div className="panel-head"><div><h2>Message preview</h2><p>Rendered copy for currently eligible prospects using approved templates.</p></div><div className="segmented"><button className={mode === "email" ? "active" : ""} onClick={() => setMode("email")}>Email</button><button className={mode === "letter" ? "active" : ""} onClick={() => setMode("letter")}>Letter</button></div></div>{error ? <p className="form-error">{error}</p> : null}{!error && !preview ? <Loading /> : null}{!error && preview?.items.length ? <div className="preview-list">{preview.items.map((item) => <article className="message-preview" key={item.campaignProspectId}><header><strong>{item.organisationName}</strong><span>{mode === "email" ? item.recipient : item.addressLines?.join(", ")}</span></header>{mode === "email" ? <h3>{item.subject}</h3> : <h3>{item.heading || "Postal letter"}</h3>}<pre>{item.body}</pre>{item.doNotContactCode ? <footer>Code: {item.doNotContactCode}</footer> : null}</article>)}</div> : null}{!error && preview && !preview.items.length ? <Empty text={`No eligible ${mode === "email" ? "email" : "letter"} recipients to preview.`} /> : null}{mode === "email" ? <form className="inline-target-form send-confirm-form" onSubmit={send}><label>Maximum sends<input name="limit" type="number" min="1" max="500" defaultValue="100" /></label><label>Confirmation<input name="confirmation" placeholder="SEND APPROVED EMAILS" /></label><Button type="submit">Send approved emails</Button>{sendStatus ? <p className="form-success">{sendStatus}</p> : null}</form> : null}</section>;
 }
 
 function ProspectTable({ prospects }: { prospects: Prospect[] }) {
@@ -586,6 +636,7 @@ type Configuration = {
     verification_expires_at?: string | null;
   } | null;
   channelPolicy?: ChannelPolicy;
+  emailDelivery?: EmailDelivery | null;
 };
 
 type LaunchGate = {
@@ -625,6 +676,25 @@ type LetterTemplateRow = {
 
 type EmailTemplateRow = LetterTemplateRow & {
   subject_line: string;
+};
+
+type RenderPreview = {
+  template: {
+    id: string;
+    name: string;
+    controllerIdentity: string;
+  };
+  count: number;
+  items: Array<{
+    campaignProspectId: string;
+    recipient?: string | null;
+    organisationName: string;
+    subject?: string | null;
+    heading?: string | null;
+    addressLines?: string[];
+    body: string;
+    doNotContactCode?: string;
+  }>;
 };
 
 function SourceRegistry() {
@@ -688,6 +758,50 @@ function SourceRegistry() {
       {!items ? <Loading /> : items.length ? <div className="table-wrap"><table><thead><tr><th>Source</th><th>Owner / evidence</th><th>Channels</th><th>Limits</th><th>Expiry</th><th>Status</th><th /></tr></thead><tbody>{items.map((item) => <tr key={item.id}><td><strong>{item.hostname_pattern ?? item.source_class}</strong><span>{item.source_class} · {item.approved_fields.join(", ")}</span></td><td>{item.owner}<span>{item.evidence_reference ?? "No evidence reference"}</span></td><td>{item.approved_channels?.join(", ") || "none"}<span>{item.retention_days ?? 365} days</span></td><td>{item.rate_limit ?? "—"} requests<span>{item.volume_limit ?? "—"} records</span></td><td>{new Date(item.expires_at).toLocaleDateString()}</td><td><Status value={item.enabled ? "enabled" : "disabled"} /></td><td>{item.enabled ? <button className="text-button" onClick={() => disable(item.id)}>Disable</button> : null}</td></tr>)}</tbody></table></div> : <Empty text="No source policies recorded." />}
     </section>
   );
+}
+
+function EmailDeliverySettings({ configuration, reload }: { configuration: Configuration; reload: () => Promise<void> }) {
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const delivery = configuration.emailDelivery;
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    setSuccess("");
+    const data = new FormData(event.currentTarget);
+    try {
+      await post("/api/settings/email-delivery", {
+        label: data.get("label"),
+        host: data.get("host"),
+        port: Number(data.get("port")),
+        secure: data.get("secure") === "on",
+        username: data.get("username"),
+        password: data.get("password"),
+        fromName: data.get("fromName"),
+        fromEmail: data.get("fromEmail"),
+        replyToEmail: data.get("replyToEmail"),
+        enabled: data.get("enabled") === "on",
+      });
+      await reload();
+      setSuccess("Email delivery settings saved.");
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+  async function test(form: HTMLFormElement) {
+    setError("");
+    setSuccess("");
+    try {
+      const result = await post<{ status: string; message: string }>("/api/settings/email-delivery/test", {
+        recipient: new FormData(form).get("testRecipient"),
+      });
+      await reload();
+      setSuccess(result.message || `SMTP ${result.status}.`);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+  return <section className="panel settings-panel"><div className="panel-head"><div><h2>Buttercup email sending</h2><p>SMTP profile for sending approved campaign email on behalf of Buttercup.</p></div><Status value={delivery?.enabled ? "enabled" : delivery?.passwordConfigured ? "configured" : "not configured"} /></div><form className="form-grid compact-form" onSubmit={save}><label>Profile name<input name="label" required defaultValue={delivery?.label ?? "Buttercup JustHost SMTP"} /></label><label>SMTP host<input name="host" required defaultValue={delivery?.host ?? "mail.buttercupchildrenstrust.org.uk"} /></label><label>Port<input name="port" type="number" min="1" max="65535" required defaultValue={delivery?.port ?? 465} /></label><label>Username<input name="username" required defaultValue={delivery?.username ?? "appeals@buttercupchildrenstrust.org.uk"} /></label><label>SMTP password<input name="password" type="password" autoComplete="off" placeholder={delivery?.passwordConfigured ? "Leave blank to keep existing password" : "Mailbox password or app password"} /></label><label>From name<input name="fromName" required defaultValue={delivery?.fromName ?? "Buttercup Children's Trust"} /></label><label>From email<input name="fromEmail" type="email" required defaultValue={delivery?.fromEmail ?? "appeals@buttercupchildrenstrust.org.uk"} /></label><label>Reply-to email<input name="replyToEmail" type="email" defaultValue={delivery?.replyToEmail ?? "appeals@buttercupchildrenstrust.org.uk"} /></label><label>Test recipient<input name="testRecipient" type="email" placeholder="karl.coulter@leodisdigital.co.uk" /></label><label className="checkbox-label"><input name="secure" type="checkbox" defaultChecked={delivery?.secure ?? true} /> SSL/TLS</label><label className="checkbox-label"><input name="enabled" type="checkbox" defaultChecked={delivery?.enabled ?? false} /> Enable sending profile</label>{delivery?.lastTestStatus ? <p className="form-help">Last test: {delivery.lastTestStatus} {delivery.lastTestMessage ? `- ${delivery.lastTestMessage}` : ""}</p> : null}{error ? <p className="form-error">{error}</p> : null}{success ? <p className="form-success">{success}</p> : null}<div className="form-actions"><button className="button secondary" type="button" onClick={(event) => test(event.currentTarget.form!)}>Test SMTP</button><Button type="submit">Save email settings</Button></div></form></section>;
 }
 
 function IntegrationSettings({ configuration, reload }: { configuration: Configuration; reload: () => Promise<void> }) {
@@ -765,6 +879,7 @@ function IntegrationSettings({ configuration, reload }: { configuration: Configu
         <div className="form-actions"><button className="button secondary" type="button" onClick={(event) => runGoogle("test", event.currentTarget.form!)}>Test connection</button><Button type="submit">Save integration</Button></div>
       </form>
     </section>
+    <EmailDeliverySettings configuration={configuration} reload={reload} />
 	    <section className="panel settings-panel">
       <div className="panel-head"><div><h2>Client-provided targets</h2><p>Control manual target intake as a governed source class.</p></div><Status value={configuration.clientTargetIntakeEnabled ? "enabled" : "disabled"} /></div>
       <form className="form-stack" onSubmit={(event) => { event.preventDefault(); updateTargetIntake(true, event.currentTarget); }}>
