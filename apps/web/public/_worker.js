@@ -1,4 +1,4 @@
-const FALLBACK_API_ORIGIN = "https://leadgen-api.leodisdigital.co.uk";
+const FALLBACK_API_ORIGIN = "https://leadgen-api.bctrust.uk";
 
 function proxyApiRequest(request, env) {
   const sourceUrl = new URL(request.url);

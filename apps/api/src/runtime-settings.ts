@@ -7,6 +7,8 @@ import type { DatabasePool } from "./db.js";
 const companiesHouseKey = "integration.companies_house_api_key";
 const googlePlacesKey = "integration.google_places_api_key";
 const productionExportsKey = "launch.production_exports_enabled";
+const bctAdminUrlKey = "integration.bct_admin_url";
+const bctApiTokenKey = "integration.bct_api_token";
 
 type SettingRow = {
   key: string;
@@ -21,6 +23,9 @@ export type RuntimeSettings = {
   productionExportsEnabled: boolean;
   liveCollectionEnabled: boolean;
   liveCollectionAvailable: boolean;
+  bctAdminUrl?: string;
+  bctApiToken?: string;
+  bctAdminConfigured: boolean;
 };
 
 function encryptionKey(environment: Environment): Buffer {
@@ -48,7 +53,7 @@ export async function getRuntimeSettings(
 ): Promise<RuntimeSettings> {
   const result = await pool.query<SettingRow>(
     "select key, value from platform_settings where key = any($1::text[])",
-    [[companiesHouseKey, googlePlacesKey, productionExportsKey]],
+    [[companiesHouseKey, googlePlacesKey, productionExportsKey, bctAdminUrlKey, bctApiTokenKey]],
   );
   const settings = new Map(result.rows.map((row) => [row.key, row.value]));
   const storedCompaniesHouseKey = settings.get(companiesHouseKey);
@@ -69,6 +74,16 @@ export async function getRuntimeSettings(
       googleApiKey = undefined;
     }
   }
+  const storedBctUrl = settings.get(bctAdminUrlKey);
+  const storedBctToken = settings.get(bctApiTokenKey);
+  let bctToken: string | undefined;
+  if (storedBctToken) {
+    try {
+      bctToken = decryptSetting(storedBctToken, environment);
+    } catch {
+      bctToken = undefined;
+    }
+  }
   return {
     companiesHouseApiKey: apiKey,
     companiesHouseConfigured: Boolean(apiKey),
@@ -80,6 +95,9 @@ export async function getRuntimeSettings(
         : settings.get(productionExportsKey) === "true",
     liveCollectionEnabled: environment.LIVE_COLLECTION_ENABLED || Boolean(googleApiKey),
     liveCollectionAvailable: Boolean(googleApiKey),
+    bctAdminUrl: storedBctUrl || undefined,
+    bctApiToken: bctToken,
+    bctAdminConfigured: Boolean(storedBctUrl && bctToken),
   };
 }
 
@@ -115,6 +133,66 @@ export async function setProductionExportsEnabled(
   enabled: boolean,
 ): Promise<void> {
   await upsertSetting(pool, productionExportsKey, String(enabled), false, userId);
+}
+
+export async function setBctAdminConfig(
+  pool: DatabasePool,
+  environment: Environment,
+  userId: string,
+  url: string,
+  token: string,
+): Promise<void> {
+  if (!url && !token) {
+    await pool.query("delete from platform_settings where key = any($1::text[])", [[bctAdminUrlKey, bctApiTokenKey]]);
+    return;
+  }
+  if (url) {
+    await upsertSetting(pool, bctAdminUrlKey, url, false, userId);
+  }
+  if (token) {
+    await upsertSetting(pool, bctApiTokenKey, encryptSetting(token, environment), true, userId);
+  }
+}
+
+const googlePlacesBudgetKey = "integration.google_places_monthly_budget_micros";
+const DEFAULT_BUDGET_MICROS = 200_000_000; // $200
+
+export async function getGooglePlacesBudgetMicros(pool: DatabasePool): Promise<number> {
+  const result = await pool.query<SettingRow>(
+    "select value from platform_settings where key = $1 limit 1",
+    [googlePlacesBudgetKey],
+  );
+  const stored = result.rows[0]?.value;
+  return stored ? Number(stored) : DEFAULT_BUDGET_MICROS;
+}
+
+export async function getCurrentMonthUsageMicros(pool: DatabasePool, provider: string): Promise<{ totalMicros: number; requestCount: number }> {
+  const result = await pool.query<{ total: string; count: string }>(
+    `select coalesce(sum(estimated_cost_micros), 0)::text as total,
+            count(*)::text as count
+     from api_usage_log
+     where provider = $1
+       and created_at >= date_trunc('month', now())`,
+    [provider],
+  );
+  return {
+    totalMicros: Number(result.rows[0]?.total ?? 0),
+    requestCount: Number(result.rows[0]?.count ?? 0),
+  };
+}
+
+export async function logApiUsage(
+  pool: DatabasePool,
+  provider: string,
+  endpoint: string,
+  costMicros: number,
+  userId?: string,
+): Promise<void> {
+  await pool.query(
+    `insert into api_usage_log (provider, endpoint, estimated_cost_micros, created_by)
+     values ($1, $2, $3, $4)`,
+    [provider, endpoint, costMicros, userId ?? null],
+  );
 }
 
 async function upsertSetting(

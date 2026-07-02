@@ -1,3 +1,6 @@
+/** Cost per Text Search request in microdollars ($0.032 = 32000 micros). */
+export const PLACES_TEXT_SEARCH_COST_MICROS = 32_000;
+
 export type GooglePlaceCandidate = {
   placeId: string;
   name: string;

@@ -30,13 +30,11 @@ import {
 } from "@lead-gen/shared";
 
 import {
-  createSession,
   destroySession,
+  getAccessEmail,
   getAuthContext,
   hashIdentifier,
   hashPassword,
-  sessionCookieName,
-  verifyPassword,
   type AuthContext,
 } from "./auth.js";
 import {
@@ -47,44 +45,26 @@ import {
   type CompaniesHouseSearchResult,
 } from "./companies-house.js";
 import type { DatabasePool } from "./db.js";
-import { searchGooglePlacesText, type GooglePlaceCandidate } from "./google-places.js";
+import { PLACES_TEXT_SEARCH_COST_MICROS, searchGooglePlacesText, type GooglePlaceCandidate } from "./google-places.js";
 import {
   decryptSetting,
   encryptSetting,
+  getCurrentMonthUsageMicros,
+  getGooglePlacesBudgetMicros,
   getRuntimeSettings,
+  logApiUsage,
+  setBctAdminConfig,
   setCompaniesHouseApiKey,
   setGooglePlacesApiKey,
   setProductionExportsEnabled,
 } from "./runtime-settings.js";
 
 const leodisFooterUrl = "https://leodisdigital.co.uk";
-const leodisFooterText = `Software designed by Leodis Digital (${leodisFooterUrl}).`;
+const leodisFooterText = `Email services provided by Leodis Digital — Helping you connect with the people who matter. (${leodisFooterUrl})`;
 
 const setupSchema = z.object({
   organisationName: z.string().trim().min(2).max(120),
-  email: z.string().email(),
-  password: z.string().min(10).max(200),
 });
-
-const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
-});
-
-const changePasswordSchema = z
-  .object({
-    currentPassword: z.string().min(1),
-    newPassword: z.string().min(10).max(200),
-    confirmPassword: z.string().min(1),
-  })
-  .refine((input) => input.newPassword === input.confirmPassword, {
-    message: "New passwords do not match",
-    path: ["confirmPassword"],
-  })
-  .refine((input) => input.currentPassword !== input.newPassword, {
-    message: "New password must be different from the current password",
-    path: ["newPassword"],
-  });
 
 const companiesHouseSettingsSchema = z.object({
   apiKey: z.string().trim().max(500),
@@ -92,6 +72,11 @@ const companiesHouseSettingsSchema = z.object({
 
 const googlePlacesSettingsSchema = z.object({
   apiKey: z.string().trim().max(500),
+});
+
+const bctAdminSettingsSchema = z.object({
+  url: z.string().trim().max(500),
+  token: z.string().trim().max(500),
 });
 
 const launchSettingsSchema = z.object({
@@ -377,6 +362,24 @@ function normaliseDomain(value: string): string {
   return new URL(candidate).hostname.toLowerCase().replace(/^www\./, "");
 }
 
+function formatMicrosAsDollars(micros: number): string {
+  return `$${(micros / 1_000_000).toFixed(2)}`;
+}
+
+async function checkGooglePlacesBudget(pool: DatabasePool, reply: FastifyReply): Promise<boolean> {
+  const [usage, budget] = await Promise.all([
+    getCurrentMonthUsageMicros(pool, "google_places"),
+    getGooglePlacesBudgetMicros(pool),
+  ]);
+  if (usage.totalMicros + PLACES_TEXT_SEARCH_COST_MICROS > budget) {
+    reply.code(429).send({
+      message: `Google Places monthly budget exhausted (${formatMicrosAsDollars(usage.totalMicros)} of ${formatMicrosAsDollars(budget)} used). Resets on the 1st.`,
+    });
+    return false;
+  }
+  return true;
+}
+
 function appendLeodisFooter(value: string): string {
   return value.includes(leodisFooterUrl) ? value : `${value.trim()}\n\n${leodisFooterText}`;
 }
@@ -537,6 +540,14 @@ function publicAppOrigin(request: FastifyRequest): string {
   const forwardedHost = request.headers["x-forwarded-host"];
   const host = Array.isArray(forwardedHost) ? forwardedHost[0] : forwardedHost || request.hostname;
   return `https://${host}`;
+}
+
+function unsubscribeOrigin(request: FastifyRequest): string {
+  return process.env.PUBLIC_UNSUBSCRIBE_ORIGIN || publicAppOrigin(request);
+}
+
+function shortUrlOrigin(): string {
+  return process.env.SHORT_URL_ORIGIN || "https://bctrust.uk";
 }
 
 function renderMergeTemplate(value: string, fields: Record<string, string>): string {
@@ -855,9 +866,11 @@ export function registerApiRoutes(
   environment: Environment,
 ) {
   app.get("/api/bootstrap", async () => {
-    const [result, settings] = await Promise.all([
+    const [result, settings, placesUsage, placesBudget] = await Promise.all([
       pool.query<{ count: string }>("select count(*)::text as count from users"),
       getRuntimeSettings(pool, environment),
+      getCurrentMonthUsageMicros(pool, "google_places"),
+      getGooglePlacesBudgetMicros(pool),
     ]);
     return {
       setupRequired: Number(result.rows[0]?.count ?? 0) === 0,
@@ -867,11 +880,21 @@ export function registerApiRoutes(
       liveCollectionEnabled: settings.liveCollectionEnabled,
       liveCollectionAvailable: settings.liveCollectionAvailable,
       policyVersion,
+      googlePlacesUsage: {
+        used: formatMicrosAsDollars(placesUsage.totalMicros),
+        budget: formatMicrosAsDollars(placesBudget),
+        remaining: formatMicrosAsDollars(Math.max(0, placesBudget - placesUsage.totalMicros)),
+        requestsThisMonth: placesUsage.requestCount,
+      },
     };
   });
 
   app.post("/api/setup", async (request, reply) => {
     const input = setupSchema.parse(request.body);
+    const accessEmail = getAccessEmail(request);
+    if (!accessEmail) {
+      return reply.code(401).send({ message: "Cloudflare Access identity required to create the first owner" });
+    }
     const client = await pool.connect();
     try {
       await client.query("begin");
@@ -886,7 +909,7 @@ export function registerApiRoutes(
       );
       const user = await client.query<{ id: string }>(
         `insert into users (email, password_hash) values ($1, $2) returning id`,
-        [input.email.toLowerCase(), await hashPassword(input.password)],
+        [accessEmail, await hashPassword(randomUUID())],
       );
       await client.query(
         `insert into organisation_memberships (organisation_id, user_id, role)
@@ -900,7 +923,6 @@ export function registerApiRoutes(
         [organisation.rows[0]!.id, policyVersion],
       );
       await client.query("commit");
-      await createSession(pool, user.rows[0]!.id, reply);
       return reply.code(201).send({ ok: true });
     } catch (error) {
       await client.query("rollback");
@@ -910,19 +932,9 @@ export function registerApiRoutes(
     }
   });
 
-  app.post("/api/login", async (request, reply) => {
-    const input = loginSchema.parse(request.body);
-    const result = await pool.query<{ id: string; password_hash: string }>(
-      "select id, password_hash from users where email = $1 limit 1",
-      [input.email.toLowerCase()],
-    );
-    const user = result.rows[0];
-    if (!user || !(await verifyPassword(input.password, user.password_hash))) {
-      return reply.code(401).send({ message: "Invalid email or password" });
-    }
-    await createSession(pool, user.id, reply);
-    return { ok: true };
-  });
+  app.post("/api/login", async (_request, reply) => reply.code(410).send({
+    message: "Local password sign-in has been removed. Use Cloudflare Zero Trust.",
+  }));
 
   app.post("/api/logout", async (request, reply) => {
     await destroySession(pool, request, reply);
@@ -1101,32 +1113,10 @@ export function registerApiRoutes(
     return reply.send(auth);
   });
 
-  app.post("/api/account/password", async (request, reply) => {
-    const auth = await requireAuth(pool, request, reply);
-    if (!auth) return;
-    const input = changePasswordSchema.parse(request.body);
-    const result = await pool.query<{ password_hash: string }>(
-      "select password_hash from users where id = $1 limit 1",
-      [auth.userId],
-    );
-    const user = result.rows[0];
-    if (!user || !(await verifyPassword(input.currentPassword, user.password_hash))) {
-      return reply.code(400).send({ message: "Current password is incorrect" });
-    }
-
-    await pool.query(
-      "update users set password_hash = $1, updated_at = now() where id = $2",
-      [await hashPassword(input.newPassword), auth.userId],
-    );
-    const currentToken = request.cookies[sessionCookieName];
-    if (currentToken) {
-      await pool.query(
-        "delete from user_sessions where user_id = $1 and token_hash <> $2",
-        [auth.userId, hashIdentifier(currentToken)],
-      );
-    }
-    await writeAudit(pool, auth, "account.password_changed", "user", auth.userId);
-    return { ok: true };
+  app.post("/api/account/password", async (_request, reply) => {
+    return reply.code(410).send({
+      message: "Local password management has been removed. Access identity now controls sign-in.",
+    });
   });
 
   app.get("/api/settings/configuration", async (request, reply) => {
@@ -1144,6 +1134,7 @@ export function registerApiRoutes(
       productionExportsEnabled: settings.productionExportsEnabled,
       liveCollectionEnabled: settings.liveCollectionEnabled,
       liveCollectionAvailable: settings.liveCollectionAvailable,
+      bctAdminConfigured: settings.bctAdminConfigured,
       clientTargetIntakeEnabled: Boolean(await requireClientSourcePolicy(pool)),
       charityPrincipal: principal,
       channelPolicy,
@@ -1740,12 +1731,184 @@ export function registerApiRoutes(
     const settings = await getRuntimeSettings(pool, environment);
     const apiKey = input.apiKey || settings.googlePlacesApiKey;
     if (!apiKey) return reply.code(400).send({ message: "Enter or save a Google Places API key first" });
+    if (!(await checkGooglePlacesBudget(pool, reply))) return;
     try {
       const places = await searchGooglePlacesText({ query: "charity", location: "Leeds", maxResults: 1 }, apiKey);
+      await logApiUsage(pool, "google_places", "places:searchText", PLACES_TEXT_SEARCH_COST_MICROS, auth.userId);
       return { ok: true, sample: places[0]?.name ?? "No sample results returned" };
     } catch {
       return reply.code(400).send({ message: "Google Places rejected the API key" });
     }
+  });
+
+  // ── BCT Admin Integration Settings ─────────────────
+  app.post("/api/settings/bct-admin", async (request, reply) => {
+    const auth = await requireOwner(pool, request, reply);
+    if (!auth) return;
+    const input = bctAdminSettingsSchema.parse(request.body);
+    await setBctAdminConfig(pool, environment, auth.userId, input.url, input.token);
+    await writeAudit(pool, auth, "settings.bct_admin_updated", "platform_setting", "bct_admin", {
+      configured: Boolean(input.url && input.token),
+    });
+    return { ok: true, configured: Boolean(input.url && input.token) };
+  });
+
+  app.post("/api/settings/bct-admin/test", async (request, reply) => {
+    const auth = await requireOwner(pool, request, reply);
+    if (!auth) return;
+    const input = bctAdminSettingsSchema.parse(request.body);
+    const settings = await getRuntimeSettings(pool, environment);
+    const url = input.url || settings.bctAdminUrl;
+    const token = input.token || settings.bctApiToken;
+    if (!url || !token) return reply.code(400).send({ message: "Enter or save BCT admin URL and token first" });
+    try {
+      const res = await fetch(`${url}/fundraising/api/campaigns?status=Active`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) return reply.code(400).send({ message: `BCT admin returned ${res.status}` });
+      const campaigns = await res.json() as Array<{ id: number; internalTitle: string }>;
+      return { ok: true, campaignCount: campaigns.length };
+    } catch (err) {
+      return reply.code(400).send({ message: "Could not connect to BCT admin" });
+    }
+  });
+
+  // ── BCT Appeal Context for Campaigns ──────────────
+  app.get("/api/campaigns/:id/bct-context/available", async (request, reply) => {
+    const auth = await requireAuth(pool, request, reply);
+    if (!auth) return;
+    const settings = await getRuntimeSettings(pool, environment);
+    if (!settings.bctAdminConfigured || !settings.bctAdminUrl || !settings.bctApiToken) {
+      return { available: false, campaigns: [] };
+    }
+    const q = (request.query as Record<string, string>).q || "";
+    try {
+      const res = await fetch(
+        `${settings.bctAdminUrl}/fundraising/api/campaigns?status=Active&q=${encodeURIComponent(q)}`,
+        { headers: { Authorization: `Bearer ${settings.bctApiToken}` } },
+      );
+      if (!res.ok) return { available: false, campaigns: [] };
+      const campaigns = await res.json();
+      return { available: true, campaigns };
+    } catch {
+      return { available: false, campaigns: [] };
+    }
+  });
+
+  app.post("/api/campaigns/:id/bct-context", async (request, reply) => {
+    const auth = await requireAuth(pool, request, reply);
+    if (!auth) return;
+    const { id } = request.params as { id: string };
+    const campaign = await campaignOwnedBy(pool, id, auth.organisationId);
+    if (!campaign) return reply.code(404).send({ message: "Campaign not found" });
+    const input = z.object({ bctCampaignId: z.coerce.number().int().positive() }).parse(request.body);
+    const settings = await getRuntimeSettings(pool, environment);
+    if (!settings.bctAdminConfigured || !settings.bctAdminUrl || !settings.bctApiToken) {
+      return reply.code(409).send({ message: "BCT admin integration not configured" });
+    }
+    try {
+      const res = await fetch(
+        `${settings.bctAdminUrl}/fundraising/api/campaigns/${input.bctCampaignId}/context`,
+        { headers: { Authorization: `Bearer ${settings.bctApiToken}` } },
+      );
+      if (!res.ok) return reply.code(400).send({ message: `BCT admin returned ${res.status}` });
+      const context = await res.json();
+      await pool.query(
+        `update campaigns set
+          bct_fundraising_campaign_id = $1,
+          bct_context_snapshot = $2,
+          bct_context_retrieved_at = now(),
+          target_location = coalesce(nullif(target_location, ''), $3),
+          updated_at = now()
+        where id = $4`,
+        [
+          String(input.bctCampaignId),
+          JSON.stringify(context),
+          (context as Record<string, string>).townCity || null,
+          id,
+        ],
+      );
+      await writeAudit(pool, auth, "campaign.bct_context_linked", "campaign", id, {
+        bctCampaignId: input.bctCampaignId,
+      });
+      return { ok: true, context };
+    } catch {
+      return reply.code(400).send({ message: "Could not fetch context from BCT admin" });
+    }
+  });
+
+  app.post("/api/campaigns/:id/bct-context/refresh", async (request, reply) => {
+    const auth = await requireAuth(pool, request, reply);
+    if (!auth) return;
+    const { id } = request.params as { id: string };
+    const campaign = await campaignOwnedBy(pool, id, auth.organisationId);
+    if (!campaign) return reply.code(404).send({ message: "Campaign not found" });
+    const bctId = (campaign as Record<string, unknown>).bct_fundraising_campaign_id as string | null;
+    if (!bctId) return reply.code(400).send({ message: "No BCT campaign linked" });
+    const settings = await getRuntimeSettings(pool, environment);
+    if (!settings.bctAdminConfigured || !settings.bctAdminUrl || !settings.bctApiToken) {
+      return reply.code(409).send({ message: "BCT admin integration not configured" });
+    }
+    try {
+      const res = await fetch(
+        `${settings.bctAdminUrl}/fundraising/api/campaigns/${bctId}/context`,
+        { headers: { Authorization: `Bearer ${settings.bctApiToken}` } },
+      );
+      if (!res.ok) return reply.code(400).send({ message: `BCT admin returned ${res.status}` });
+      const context = await res.json();
+      await pool.query(
+        `update campaigns set
+          bct_context_snapshot = $1,
+          bct_context_retrieved_at = now(),
+          updated_at = now()
+        where id = $2`,
+        [JSON.stringify(context), id],
+      );
+      return { ok: true, context };
+    } catch {
+      return reply.code(400).send({ message: "Could not refresh context from BCT admin" });
+    }
+  });
+
+  app.delete("/api/campaigns/:id/bct-context", async (request, reply) => {
+    const auth = await requireAuth(pool, request, reply);
+    if (!auth) return;
+    const { id } = request.params as { id: string };
+    const campaign = await campaignOwnedBy(pool, id, auth.organisationId);
+    if (!campaign) return reply.code(404).send({ message: "Campaign not found" });
+    await pool.query(
+      `update campaigns set
+        bct_fundraising_campaign_id = null,
+        bct_context_snapshot = null,
+        bct_context_retrieved_at = null,
+        updated_at = now()
+      where id = $1`,
+      [id],
+    );
+    await writeAudit(pool, auth, "campaign.bct_context_removed", "campaign", id);
+    return { ok: true };
+  });
+
+  app.get("/api/settings/api-usage", async (request, reply) => {
+    const auth = await requireOwner(pool, request, reply);
+    if (!auth) return;
+    const [usage, budget] = await Promise.all([
+      getCurrentMonthUsageMicros(pool, "google_places"),
+      getGooglePlacesBudgetMicros(pool),
+    ]);
+    const now = new Date();
+    const periodStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    return {
+      googlePlaces: {
+        used: formatMicrosAsDollars(usage.totalMicros),
+        budget: formatMicrosAsDollars(budget),
+        remaining: formatMicrosAsDollars(Math.max(0, budget - usage.totalMicros)),
+        requestsThisMonth: usage.requestCount,
+        periodStart: periodStart.toISOString(),
+        periodEnd: periodEnd.toISOString(),
+      },
+    };
   });
 
 	  app.post("/api/settings/launch", async (request, reply) => {
@@ -2599,6 +2762,7 @@ export function registerApiRoutes(
         reasonCodes: authorization.reasonCodes,
       });
     }
+    if (!(await checkGooglePlacesBudget(pool, reply))) return;
 
     const [channelPolicy, principal, websitePolicy, places] = await Promise.all([
       getChannelPolicy(pool),
@@ -2606,6 +2770,7 @@ export function registerApiRoutes(
       requireSourcePolicyByClass(pool, "company-website"),
       searchGooglePlacesText(input, settings.googlePlacesApiKey),
     ]);
+    await logApiUsage(pool, "google_places", "places:searchText", PLACES_TEXT_SEARCH_COST_MICROS, auth.userId);
     const principalVerified = Boolean(
       principal?.status === "verified" &&
       principal.verification_expires_at &&
@@ -3594,7 +3759,7 @@ export function registerApiRoutes(
     const header = channel === "corporate_email"
       ? ["organisation_name", "entity_type", "company_number", "charity_number", "domain", "role_mailbox", "do_not_contact_url", "decision_id"]
       : channel === "postal_letter"
-        ? ["organisation_name", "entity_type", "company_number", "charity_number", "postal_address_json", "do_not_contact_code", "decision_id"]
+        ? ["organisation_name", "entity_type", "company_number", "charity_number", "postal_address_json", "do_not_contact_code", "do_not_contact_url", "decision_id"]
         : ["organisation_name", "entity_type", "company_number", "charity_number", "channel", "outcome", "reason_codes", "decision_id"];
     const lines = rows.map((row) => {
       if (channel === "corporate_email") {
@@ -3605,7 +3770,7 @@ export function registerApiRoutes(
           row.charity_commission_number,
           row.registrable_domain,
           row.mailbox,
-          `https://${request.hostname}/do-not-contact?token=${row.do_not_contact_token}`,
+          `${unsubscribeOrigin(request)}/stop?token=${row.do_not_contact_token}`,
           row.decision_id,
         ].map(csvCell).join(",");
       }
@@ -3617,6 +3782,7 @@ export function registerApiRoutes(
           row.charity_commission_number,
           JSON.stringify(row.postal_address ?? {}),
           row.do_not_contact_code,
+          `${shortUrlOrigin()}/${row.do_not_contact_code}`,
           row.decision_id,
         ].map(csvCell).join(",");
       }
@@ -3660,7 +3826,6 @@ export function registerApiRoutes(
     const template = await getRenderTemplate(pool, auth.organisationId, "email_template_manifests", input.templateId);
     if (!template) return reply.code(404).send({ message: "No email template is available for preview" });
     const prospects = await getPreviewProspects(pool, auth.organisationId, id, "corporate_email", input.limit);
-    const origin = publicAppOrigin(request);
     return {
       template: {
         id: template.id,
@@ -3669,7 +3834,7 @@ export function registerApiRoutes(
       },
       count: prospects.length,
       items: prospects.map((prospect) => {
-        const doNotContactUrl = `${origin}${template.do_not_contact_route}?preview=true`;
+        const doNotContactUrl = `${unsubscribeOrigin(request)}/stop?preview=true`;
         const fields = mergeFieldsFor(prospect, doNotContactUrl);
         return {
           campaignProspectId: prospect.campaign_prospect_id,
@@ -3692,7 +3857,6 @@ export function registerApiRoutes(
     const template = await getRenderTemplate(pool, auth.organisationId, "letter_template_manifests", input.templateId);
     if (!template) return reply.code(404).send({ message: "No letter template is available for preview" });
     const prospects = await getPreviewProspects(pool, auth.organisationId, id, "postal_letter", input.limit);
-    const origin = publicAppOrigin(request);
     return {
       template: {
         id: template.id,
@@ -3702,7 +3866,7 @@ export function registerApiRoutes(
       count: prospects.length,
       items: prospects.map((prospect) => {
         const doNotContactCode = "PREVIEW";
-        const doNotContactUrl = `${origin}${template.do_not_contact_route}?code=${doNotContactCode}`;
+        const doNotContactUrl = `${unsubscribeOrigin(request)}/stop?code=${doNotContactCode}`;
         const fields = mergeFieldsFor(prospect, doNotContactUrl, doNotContactCode);
         return {
           campaignProspectId: prospect.campaign_prospect_id,
@@ -3751,12 +3915,11 @@ export function registerApiRoutes(
         pass: decryptSetting(delivery.encrypted_password, environment),
       },
     });
-    const origin = publicAppOrigin(request);
     const results: Array<{ campaignProspectId: string; recipient: string | null; status: string; message?: string }> = [];
     for (const prospect of prospects) {
       if (!prospect.mailbox) continue;
       const token = randomUUID();
-      const doNotContactUrl = `${origin}${template.do_not_contact_route}?token=${token}`;
+      const doNotContactUrl = `${unsubscribeOrigin(request)}/stop?token=${token}`;
       const fields = mergeFieldsFor(prospect, doNotContactUrl);
       const subject = renderMergeTemplate(template.subject_line ?? "", fields);
       const body = renderMergeTemplate(template.body_text, fields);

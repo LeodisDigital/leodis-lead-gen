@@ -11,13 +11,15 @@ module.exports = {
       time: true,
       env: {
         NODE_ENV: "production",
-        API_HOST: "192.168.1.207",
-        API_PORT: "30156",
+        API_HOST: "0.0.0.0",
+        API_PORT: "49172",
         DATABASE_URL: "postgresql://leadgen:leadgen@localhost:55432/leadgen",
         REDIS_URL: "redis://localhost:56379",
         LIVE_COLLECTION_ENABLED: "false",
         PRODUCTION_EXPORTS_ENABLED: "false",
-        SESSION_SECRET: "lead-gen-bct-local-network-session-secret-2026",
+        PUBLIC_UNSUBSCRIBE_ORIGIN: "https://buttercupchildrenstrust.org.uk",
+        SHORT_URL_ORIGIN: "https://bctrust.uk",
+        SESSION_SECRET: "HknPOcxTMNKdLfPYT7rm3GlzZhQszhaGdJENjIGwiVDKsbRQf7-YmyVUhT4__hnG",
       },
     },
     {

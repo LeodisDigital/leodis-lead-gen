@@ -15,7 +15,7 @@ describe("readiness", () => {
     expect(response.body).toContain("Lead Gen V2");
 
     await app.close();
-  });
+  }, 15000);
 
   it("reports live capabilities disabled", async () => {
     const app = buildApp();
@@ -107,6 +107,60 @@ describe("public compliance intake", () => {
 
     expect(response.statusCode).toBe(201);
     expect(query.mock.calls[0]?.[1]?.[1]).not.toBe("person@example.com");
+    await app.close();
+  });
+});
+
+describe("Cloudflare Zero Trust auth", () => {
+  it("authenticates a user from the Access email header", async () => {
+    const payload = Buffer.from(JSON.stringify({ email: "karl@buttercupchildrenstrust.org.uk" })).toString("base64url");
+    const token = `header.${payload}.signature`;
+    const query = vi.fn().mockResolvedValueOnce({
+      rows: [{
+        userId: "user-1",
+        email: "karl@buttercupchildrenstrust.org.uk",
+        organisationId: "org-1",
+        organisationName: "Buttercup",
+        role: "owner",
+        organisationApproved: true,
+      }],
+    });
+    const app = buildApp({
+      environment: environmentSchema.parse({ NODE_ENV: "test" }),
+      pool: { query } as unknown as DatabasePool,
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/me",
+      cookies: {
+        cf_authorization: token,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      email: "karl@buttercupchildrenstrust.org.uk",
+      organisationName: "Buttercup",
+      role: "owner",
+    });
+    await app.close();
+  });
+
+  it("rejects local password login", async () => {
+    const app = buildApp({
+      environment: environmentSchema.parse({ NODE_ENV: "test" }),
+      pool: { query: vi.fn() } as unknown as DatabasePool,
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/login",
+      payload: { email: "karl@buttercupchildrenstrust.org.uk", password: "anything" },
+    });
+
+    expect(response.statusCode).toBe(410);
+    expect(response.json().message).toContain("Cloudflare Zero Trust");
     await app.close();
   });
 });

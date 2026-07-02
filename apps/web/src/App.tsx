@@ -31,6 +31,7 @@ type Bootstrap = {
   productionExportsEnabled: boolean;
   liveCollectionEnabled: boolean;
   liveCollectionAvailable: boolean;
+  bctAdminConfigured: boolean;
   policyVersion: string;
 };
 
@@ -53,6 +54,21 @@ type Campaign = {
   max_leads?: number;
   lead_count?: number;
   created_at: string;
+  bct_fundraising_campaign_id?: string;
+  bct_context_snapshot?: BctContext;
+  bct_context_retrieved_at?: string;
+};
+
+type BctContext = {
+  id: number;
+  internalTitle: string;
+  publicTitle?: string;
+  townCity?: string;
+  conditionWording?: string;
+  needWording?: string;
+  suggestedWording?: string;
+  status: string;
+  updatedAt?: string;
 };
 
 type Lead = {
@@ -175,40 +191,12 @@ function Setup({ onDone }: { onDone: () => void }) {
     }
   }
   return (
-    <AuthFrame title="Set up your workspace" copy="Create the first owner account for this private Lead Gen installation.">
+    <AuthFrame title="Set up your workspace" copy="Create the first owner account from your Cloudflare Zero Trust identity.">
       <form className="form-stack" onSubmit={submit}>
         <label>Organisation name<input name="organisationName" required minLength={2} /></label>
-        <label>Email address<input name="email" type="email" required /></label>
-        <label>Password<input name="password" type="password" required minLength={10} /></label>
         {error ? <p className="form-error">{error}</p> : null}
-        <Button type="submit">Create secure workspace <ChevronRight size={16} /></Button>
+        <Button type="submit">Create workspace <ChevronRight size={16} /></Button>
       </form>
-    </AuthFrame>
-  );
-}
-
-function Login({ onDone }: { onDone: () => void }) {
-  const [error, setError] = useState("");
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    try {
-      await post("/api/login", Object.fromEntries(data));
-      onDone();
-    } catch (err) {
-      setError((err as Error).message);
-    }
-  }
-  return (
-    <AuthFrame title="Welcome back" copy="Sign in to manage compliant corporate lead research.">
-      <form className="form-stack" onSubmit={submit}>
-        <label>Email address<input name="email" type="email" required /></label>
-        <div className="login-password-label"><label>Password</label><span>Private owner access</span></div>
-        <input name="password" type="password" required />
-        {error ? <p className="form-error">{error}</p> : null}
-        <Button type="submit">Sign in <ChevronRight size={16} /></Button>
-      </form>
-      <div className="public-links"><a href="/objection">Object to processing</a><a href="/rights">Rights request</a><a href="/complaint">Make a complaint</a></div>
     </AuthFrame>
   );
 }
@@ -255,7 +243,7 @@ function Shell({ user, path, go, children, logout }: { user: User; path: string;
             return <button key={item.path} className={active ? "nav-item active" : "nav-item"} onClick={() => { go(item.path); setMobileOpen(false); }}><item.icon size={18} />{item.label}</button>;
           })}
         </nav>
-        <div className="sidebar-foot"><div className="org-avatar">{user.organisationName.slice(0, 2).toUpperCase()}</div><div><strong>{user.organisationName}</strong><span>{user.role}</span></div><button onClick={logout} title="Log out"><LogOut size={18} /></button></div>
+        <div className="sidebar-foot"><div className="org-avatar">{user.organisationName.slice(0, 2).toUpperCase()}</div><div><strong>{user.organisationName}</strong><span>{user.role}</span></div><button onClick={logout} title="Log out of Access"><LogOut size={18} /></button></div>
       </aside>
       <main className="main">
         <header className="topbar"><button className="mobile-menu" onClick={() => setMobileOpen(true)}><Menu size={20} /></button><div><strong>{user.organisationName}</strong><span>Compliance workspace</span></div><div className="topbar-user">{user.email}</div></header>
@@ -408,7 +396,28 @@ function CampaignDetail({ id, bootstrap, user }: { id: string; bootstrap: Bootst
   const action = data.campaign.status === "pending_approval" && user.role === "owner"
     ? <Button onClick={approve}><ClipboardCheck size={16} /> Verify and approve</Button>
     : <div className="export-actions"><a className={`button secondary ${bootstrap.productionExportsEnabled ? "" : "disabled"}`} href={`/api/campaigns/${id}/export-email.csv`}><Download size={16} /> Email CSV</a><a className={`button secondary ${bootstrap.productionExportsEnabled ? "" : "disabled"}`} href={`/api/campaigns/${id}/export-letters.csv`}><Download size={16} /> Letter CSV</a><a className="button secondary" href={`/api/campaigns/${id}/review-quarantine.csv`}><Download size={16} /> Quarantine</a></div>;
-  return <><PageHeader title={data.campaign.name} copy={data.campaign.purpose} action={action} /><div className="mini-stats"><span><strong>{data.leads.length + (prospects?.length ?? 0)}</strong> assessed</span><span><strong>{eligible + prospectEligible}</strong> eligible</span><span><strong>{(prospects?.filter((item) => item.outcome === "held").length ?? 0)}</strong> held</span></div><CampaignPreviewPanel campaignId={id} /><section className="panel"><div className="panel-head"><div><h2>Google discovery</h2><p>Find organisations by category and location, verify companies where possible, then route to email or post.</p></div><Status value={bootstrap.googlePlacesConfigured ? "configured" : "key required"} /></div><form className="prospect-form" onSubmit={discoverGoogle}><label>Search<input name="query" required defaultValue={data.campaign.target_industry ?? ""} placeholder="charities, electricians, plumbers" /></label><label>Location<input name="location" defaultValue={data.campaign.target_location ?? ""} placeholder="Leeds" /></label><label>Maximum results<input name="maxResults" type="number" min="1" max="20" defaultValue="10" /></label><label className="checkbox-label"><input name="lawfulBasisRecorded" type="checkbox" /> Lawful basis recorded</label><label className="checkbox-label"><input name="transparencyRecorded" type="checkbox" /> Transparency recorded</label><label className="checkbox-label"><input name="addressSourceApproved" type="checkbox" /> Address source approved</label><label className="checkbox-label"><input name="publicContextApproved" type="checkbox" /> Public context approved</label><label className="checkbox-label"><input name="discoverWebsiteMailboxes" type="checkbox" defaultChecked /> Find role emails on websites</label>{error ? <p className="form-error">{error}</p> : null}<Button type="submit"><Search size={16} /> Discover leads</Button></form></section><section className="panel"><div className="panel-head"><div><h2>Add Buttercup prospect</h2><p>Assess organisations or people into email, letter, consent-required, held, or quarantine channels.</p></div></div><form className="prospect-form" onSubmit={addProspect}><label>Entity type<select name="entityType" defaultValue="uk_limited_company"><option value="uk_limited_company">UK limited company</option><option value="uk_llp">UK LLP</option><option value="registered_charity">Registered charity</option><option value="charitable_company">Charitable company</option><option value="sole_trader">Sole trader</option><option value="individual">Individual</option><option value="unsupported">Unsupported</option></select></label><label>Channel<select name="channel" defaultValue="corporate_email"><option value="corporate_email">Corporate email</option><option value="postal_letter">Postal letter</option><option value="individual_email">Individual email</option></select></label><label>Legal name<input name="legalName" required placeholder="Example Community Ltd" /></label><label>Trading name<input name="tradingName" placeholder="Optional" /></label><label>Company number<input name="companyNumber" placeholder="01234567" /></label><label>Charity number<input name="charityCommissionNumber" placeholder="1128027" /></label><label>OSCR number<input name="oscrNumber" placeholder="SC042679" /></label><label>Domain<input name="domain" placeholder="example.org.uk" /></label><label>Mailbox<input name="mailbox" type="email" placeholder="info@example.org.uk" /></label><label>Address line<input name="postalLine1" placeholder="1 High Street" /></label><label>Town<input name="postalTown" placeholder="Leeds" /></label><label>Postcode<input name="postalPostcode" placeholder="LS1 1AA" /></label><label>Address context<select name="addressContext" defaultValue="unknown"><option value="business">Business</option><option value="registered_office">Registered office</option><option value="likely_home">Likely home</option><option value="unknown">Unknown</option></select></label><label className="checkbox-label"><input name="lawfulBasisRecorded" type="checkbox" /> Lawful basis recorded</label><label className="checkbox-label"><input name="transparencyRecorded" type="checkbox" /> Transparency recorded</label><label className="checkbox-label"><input name="addressSourceApproved" type="checkbox" /> Address source approved</label><label className="checkbox-label"><input name="publicContextApproved" type="checkbox" /> Public context approved</label><label className="checkbox-label"><input name="consentRecorded" type="checkbox" /> Consent recorded</label><label className="checkbox-label"><input name="sensitiveTargetingRisk" type="checkbox" /> Sensitive targeting risk</label>{error ? <p className="form-error">{error}</p> : null}<Button type="submit"><Plus size={16} /> Assess prospect</Button></form></section><section className="panel"><div className="panel-head"><div><h2>Prospect channel decisions</h2><p>Current Buttercup outreach decision by channel.</p></div></div>{prospects ? <ProspectTable prospects={prospects} /> : <Loading />}</section><section className="panel"><div className="panel-head"><div><h2>Legacy lead assessments</h2><p>Existing company/mailbox records retained during migration.</p></div></div><LeadTable leads={data.leads} suppress={suppress} /></section></>;
+  return <><PageHeader title={data.campaign.name} copy={data.campaign.purpose} action={action} /><div className="mini-stats"><span><strong>{data.leads.length + (prospects?.length ?? 0)}</strong> assessed</span><span><strong>{eligible + prospectEligible}</strong> eligible</span><span><strong>{(prospects?.filter((item) => item.outcome === "held").length ?? 0)}</strong> held</span></div><BctContextPanel campaign={data.campaign} campaignId={id} configured={bootstrap.bctAdminConfigured} onUpdate={load} /><CampaignPreviewPanel campaignId={id} /><section className="panel"><div className="panel-head"><div><h2>Google discovery</h2><p>Find organisations by category and location, verify companies where possible, then route to email or post.</p></div><Status value={bootstrap.googlePlacesConfigured ? "configured" : "key required"} /></div><form className="prospect-form" onSubmit={discoverGoogle}><label>Search<input name="query" required defaultValue={data.campaign.target_industry ?? ""} placeholder="charities, electricians, plumbers" /></label><label>Location<input name="location" defaultValue={data.campaign.target_location ?? ""} placeholder="Leeds" /></label><label>Maximum results<input name="maxResults" type="number" min="1" max="20" defaultValue="10" /></label><label className="checkbox-label"><input name="lawfulBasisRecorded" type="checkbox" /> Lawful basis recorded</label><label className="checkbox-label"><input name="transparencyRecorded" type="checkbox" /> Transparency recorded</label><label className="checkbox-label"><input name="addressSourceApproved" type="checkbox" /> Address source approved</label><label className="checkbox-label"><input name="publicContextApproved" type="checkbox" /> Public context approved</label><label className="checkbox-label"><input name="discoverWebsiteMailboxes" type="checkbox" defaultChecked /> Find role emails on websites</label>{error ? <p className="form-error">{error}</p> : null}<Button type="submit"><Search size={16} /> Discover leads</Button></form></section><section className="panel"><div className="panel-head"><div><h2>Add Buttercup prospect</h2><p>Assess organisations or people into email, letter, consent-required, held, or quarantine channels.</p></div></div><form className="prospect-form" onSubmit={addProspect}><label>Entity type<select name="entityType" defaultValue="uk_limited_company"><option value="uk_limited_company">UK limited company</option><option value="uk_llp">UK LLP</option><option value="registered_charity">Registered charity</option><option value="charitable_company">Charitable company</option><option value="sole_trader">Sole trader</option><option value="individual">Individual</option><option value="unsupported">Unsupported</option></select></label><label>Channel<select name="channel" defaultValue="corporate_email"><option value="corporate_email">Corporate email</option><option value="postal_letter">Postal letter</option><option value="individual_email">Individual email</option></select></label><label>Legal name<input name="legalName" required placeholder="Example Community Ltd" /></label><label>Trading name<input name="tradingName" placeholder="Optional" /></label><label>Company number<input name="companyNumber" placeholder="01234567" /></label><label>Charity number<input name="charityCommissionNumber" placeholder="1128027" /></label><label>OSCR number<input name="oscrNumber" placeholder="SC042679" /></label><label>Domain<input name="domain" placeholder="example.org.uk" /></label><label>Mailbox<input name="mailbox" type="email" placeholder="info@example.org.uk" /></label><label>Address line<input name="postalLine1" placeholder="1 High Street" /></label><label>Town<input name="postalTown" placeholder="Leeds" /></label><label>Postcode<input name="postalPostcode" placeholder="LS1 1AA" /></label><label>Address context<select name="addressContext" defaultValue="unknown"><option value="business">Business</option><option value="registered_office">Registered office</option><option value="likely_home">Likely home</option><option value="unknown">Unknown</option></select></label><label className="checkbox-label"><input name="lawfulBasisRecorded" type="checkbox" /> Lawful basis recorded</label><label className="checkbox-label"><input name="transparencyRecorded" type="checkbox" /> Transparency recorded</label><label className="checkbox-label"><input name="addressSourceApproved" type="checkbox" /> Address source approved</label><label className="checkbox-label"><input name="publicContextApproved" type="checkbox" /> Public context approved</label><label className="checkbox-label"><input name="consentRecorded" type="checkbox" /> Consent recorded</label><label className="checkbox-label"><input name="sensitiveTargetingRisk" type="checkbox" /> Sensitive targeting risk</label>{error ? <p className="form-error">{error}</p> : null}<Button type="submit"><Plus size={16} /> Assess prospect</Button></form></section><section className="panel"><div className="panel-head"><div><h2>Prospect channel decisions</h2><p>Current Buttercup outreach decision by channel.</p></div></div>{prospects ? <ProspectTable prospects={prospects} /> : <Loading />}</section><section className="panel"><div className="panel-head"><div><h2>Legacy lead assessments</h2><p>Existing company/mailbox records retained during migration.</p></div></div><LeadTable leads={data.leads} suppress={suppress} /></section></>;
+}
+
+function BctContextPanel({ campaign, campaignId, configured, onUpdate }: { campaign: Campaign; campaignId: string; configured: boolean; onUpdate: () => void }) {
+  const [bctId, setBctId] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+  const ctx = campaign.bct_context_snapshot;
+  async function link(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault(); setError(""); setLoading(true);
+    try { await post(`/api/campaigns/${campaignId}/bct-context`, { bctCampaignId: Number(bctId) }); setBctId(""); onUpdate(); } catch (err) { setError((err as Error).message); } finally { setLoading(false); }
+  }
+  async function refresh() {
+    setError(""); setLoading(true);
+    try { await post(`/api/campaigns/${campaignId}/bct-context/refresh`, {}); onUpdate(); } catch (err) { setError((err as Error).message); } finally { setLoading(false); }
+  }
+  async function remove() {
+    setError(""); setLoading(true);
+    try { await fetch(`/api/campaigns/${campaignId}/bct-context`, { method: "DELETE", credentials: "same-origin" }); onUpdate(); } catch (err) { setError((err as Error).message); } finally { setLoading(false); }
+  }
+  if (!configured) return null;
+  return <section className="panel"><div className="panel-head"><div><h2>Appeal context</h2><p>Link a BCT admin fundraising campaign to use as appeal context for this campaign.</p></div><Status value={ctx ? "linked" : "not linked"} /></div>{ctx ? <div className="bct-context"><div className="bct-context-fields"><div><strong>Campaign:</strong> {ctx.internalTitle}</div>{ctx.townCity ? <div><strong>Town/City:</strong> {ctx.townCity}</div> : null}{ctx.conditionWording ? <div><strong>Condition:</strong> {ctx.conditionWording}</div> : null}{ctx.needWording ? <div><strong>Need:</strong> {ctx.needWording}</div> : null}{ctx.suggestedWording ? <div><strong>Wording:</strong> {ctx.suggestedWording}</div> : null}<div><strong>Status:</strong> {ctx.status}</div>{campaign.bct_context_retrieved_at ? <div className="text-muted">Retrieved {new Date(campaign.bct_context_retrieved_at).toLocaleString()}</div> : null}</div><div className="bct-context-actions"><button className="button secondary" onClick={refresh} disabled={loading}>Refresh</button><button className="button secondary" onClick={remove} disabled={loading}>Remove</button></div></div> : <form className="inline-target-form" onSubmit={link}><label>BCT Campaign ID<input type="number" min="1" value={bctId} onChange={(e) => setBctId(e.target.value)} required /></label><Button type="submit" disabled={loading}>Link appeal context</Button></form>}{error ? <p className="form-error">{error}</p> : null}</section>;
 }
 
 function CampaignPreviewPanel({ campaignId }: { campaignId: string }) {
@@ -629,6 +638,7 @@ type Configuration = {
   productionExportsEnabled: boolean;
   liveCollectionEnabled: boolean;
   liveCollectionAvailable: boolean;
+  bctAdminConfigured: boolean;
   clientTargetIntakeEnabled: boolean;
   charityPrincipal?: {
     status: string;
@@ -879,6 +889,7 @@ function IntegrationSettings({ configuration, reload }: { configuration: Configu
         <div className="form-actions"><button className="button secondary" type="button" onClick={(event) => runGoogle("test", event.currentTarget.form!)}>Test connection</button><Button type="submit">Save integration</Button></div>
       </form>
     </section>
+    <BctAdminSettings configuration={configuration} reload={reload} />
     <EmailDeliverySettings configuration={configuration} reload={reload} />
 	    <section className="panel settings-panel">
       <div className="panel-head"><div><h2>Client-provided targets</h2><p>Control manual target intake as a governed source class.</p></div><Status value={configuration.clientTargetIntakeEnabled ? "enabled" : "disabled"} /></div>
@@ -891,6 +902,24 @@ function IntegrationSettings({ configuration, reload }: { configuration: Configu
     <SourceRegistry />
     </div>
   );
+}
+
+function BctAdminSettings({ configuration, reload }: { configuration: Configuration; reload: () => Promise<void> }) {
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  async function runBct(action: "save" | "test", form: HTMLFormElement) {
+    setError(""); setSuccess("");
+    try {
+      const data = Object.fromEntries(new FormData(form));
+      const result = await post<{ campaignCount?: number }>(
+        action === "save" ? "/api/settings/bct-admin" : "/api/settings/bct-admin/test",
+        data,
+      );
+      if (action === "save") { form.reset(); await reload(); setSuccess("BCT admin integration updated."); }
+      else { setSuccess(`Connection successful: ${result.campaignCount ?? 0} active campaigns found.`); }
+    } catch (err) { setError((err as Error).message); }
+  }
+  return <section className="panel settings-panel"><div className="panel-head"><div><h2>BCT Admin</h2><p>Link fundraising campaign context from the BCT admin system.</p></div><Status value={configuration.bctAdminConfigured ? "configured" : "not configured"} /></div><form className="form-stack" onSubmit={(event) => { event.preventDefault(); runBct("save", event.currentTarget); }}><label>BCT Admin URL<input name="url" type="url" maxLength={500} autoComplete="off" placeholder={configuration.bctAdminConfigured ? "Enter a replacement URL" : "https://bct-admin.example.com"} /></label><label>API Token<input name="token" type="password" maxLength={500} autoComplete="off" placeholder={configuration.bctAdminConfigured ? "Enter a replacement token" : "Enter BCT admin API token"} /></label><p className="form-help">The token is encrypted before storage. Configure this to enable appeal context linking on campaigns.</p>{error ? <p className="form-error">{error}</p> : null}{success ? <p className="form-success">{success}</p> : null}<div className="form-actions"><button className="button secondary" type="button" onClick={(event) => runBct("test", event.currentTarget.form!)}>Test connection</button><Button type="submit">Save integration</Button></div></form></section>;
 }
 
 function CharityPrincipalSettings({ configuration, reload }: { configuration: Configuration; reload: () => Promise<void> }) {
@@ -1093,29 +1122,50 @@ function Control({ label, ok, detail }: { label: string; ok: boolean; detail: st
 
 function Empty({ text }: { text: string }) { return <div className="empty"><FileSearch size={28} /><p>{text}</p></div>; }
 function Loading() { return <div className="loading"><span /><span /><span /></div>; }
+function StartupError({ message, retry }: { message: string; retry: () => void }) {
+  return (
+    <div className="startup-error">
+      <CircleAlert size={18} />
+      <div>
+        <strong>Unable to load the workspace</strong>
+        <p>{message}</p>
+      </div>
+      <Button kind="secondary" onClick={retry}><ChevronRight size={16} /> Retry</Button>
+    </div>
+  );
+}
 
 export function App() {
   const { path, go } = usePath();
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [user, setUser] = useState<User | null | undefined>(undefined);
+  const [startupError, setStartupError] = useState("");
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const refresh = async () => {
-    const nextBootstrap = await api<Bootstrap>("/api/bootstrap");
-    setBootstrap(nextBootstrap);
-    if (!nextBootstrap.setupRequired) {
-      setUser(await api<User>("/api/me").catch(() => null));
-    } else setUser(null);
+    setStartupError("");
+    try {
+      const nextBootstrap = await api<Bootstrap>("/api/bootstrap");
+      setBootstrap(nextBootstrap);
+      if (!nextBootstrap.setupRequired) {
+        setUser(await api<User>("/api/me").catch(() => null));
+      } else setUser(null);
+    } catch (err) {
+      setBootstrap(null);
+      setUser(undefined);
+      setStartupError((err as Error).message);
+    }
   };
   useEffect(() => { refresh(); }, []);
   useEffect(() => { if (user) api<Campaign[]>("/api/campaigns").then(setCampaigns); }, [user, path]);
   const campaignId = useMemo(() => path.match(/^\/campaigns\/([^/]+)$/)?.[1], [path]);
+  if (startupError) return <div className="full-loading"><StartupError message={startupError} retry={refresh} /></div>;
   if (!bootstrap || user === undefined) return <div className="full-loading"><Loading /></div>;
   if (path === "/objection") return <PublicRequestPage mode="objection" />;
   if (path === "/rights") return <PublicRequestPage mode="rights" />;
   if (path === "/complaint") return <PublicRequestPage mode="complaint" />;
   if (path === "/do-not-contact") return <DoNotContactPage />;
   if (bootstrap.setupRequired) return <Setup onDone={refresh} />;
-  if (!user) return <Login onDone={refresh} />;
+  if (!user) return <div className="full-loading"><StartupError message="Cloudflare Zero Trust did not supply an authenticated user for this request." retry={refresh} /></div>;
   let page: ReactNode;
   if (path === "/") page = <Overview bootstrap={bootstrap} go={go} />;
   else if (path === "/campaigns") page = <Campaigns go={go} />;
@@ -1126,5 +1176,5 @@ export function App() {
   else if (path === "/compliance") page = <Compliance bootstrap={bootstrap} />;
   else if (path === "/settings") page = <SettingsPage user={user} refresh={refresh} />;
   else page = <Empty text="Page not found." />;
-  return <Shell user={user} path={path} go={go} logout={async () => { await post("/api/logout", {}); setUser(null); go("/"); }}>{page}</Shell>;
+  return <Shell user={user} path={path} go={go} logout={() => { window.location.href = "/cdn-cgi/access/logout"; }}>{page}</Shell>;
 }

@@ -8,3 +8,4 @@ coverage/
 .local-admin-credentials
 *.log
 .DS_Store
+planning/fundraising-tracker/

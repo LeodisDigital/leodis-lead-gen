@@ -202,6 +202,9 @@ export const campaigns = pgTable("campaigns", {
   maxLeads: integer("max_leads").notNull().default(100),
   status: campaignStatus("status").notNull().default("draft"),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  bctFundraisingCampaignId: text("bct_fundraising_campaign_id"),
+  bctContextSnapshot: jsonb("bct_context_snapshot"),
+  bctContextRetrievedAt: timestamp("bct_context_retrieved_at", { withTimezone: true }),
   ...timestamps,
 }, (table) => [index("campaigns_organisation_idx").on(table.organisationId)]);
 
